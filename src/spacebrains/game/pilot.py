@@ -39,6 +39,10 @@ class ShipPilot:
         self.errand: tuple[str, str, str] | None = None
         self.in_step = False
         self.needs_refresh = False  # another pilot changed our cargo (transfer)
+        self.last_buy_cost = 0
+        self._trade_started = 0.0
+        self._trade_cost = 0
+        self._trade_units = 0
         self._wait_since: float | None = None
         self._task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
@@ -602,13 +606,16 @@ class ShipPilot:
         return 1
 
     async def _buy(self, good: str, units: int, volume: int) -> int:
+        """Buy in trade-volume chunks; sets `last_buy_cost` for ledger bookkeeping."""
         bought = 0
+        self.last_buy_cost = 0
         while units > 0:
             chunk = min(max(1, volume), units)
-            cargo, _tx, agent = await self.ctx.client.purchase_cargo(self.ship.symbol, good, chunk)
+            cargo, tx, agent = await self.ctx.client.purchase_cargo(self.ship.symbol, good, chunk)
             self.ship.cargo = cargo
             await self.ctx.on_credits(agent.credits)
             bought += chunk
+            self.last_buy_cost += tx.total_price
             units -= chunk
         return bought
 
@@ -678,8 +685,13 @@ class ShipPilot:
                 self.ctx.trade_plans.pop(s.symbol, None)
                 return 60
             bought = await self._buy(route.good, units, good.trade_volume)
+            self._trade_started = time.time()
+            self._trade_cost = self.last_buy_cost
+            self._trade_units = bought
             await self.ctx.emit(
-                "buy", f"{s.symbol} bought {bought} {route.good} at {self.wp}", ship=s.symbol
+                "buy",
+                f"{s.symbol} bought {bought} {route.good} at {self.wp} for {self.last_buy_cost}c",
+                ship=s.symbol,
             )
             await self.refuel_if_possible()
             return 1
@@ -689,7 +701,27 @@ class ShipPilot:
         earned = await self.sell_cargo()
         await self.refuel_if_possible()
         self.ctx.trade_plans.pop(s.symbol, None)
-        self.status = f"trade done: +{earned}c"
+        profit = earned - self._trade_cost
+        await self.ctx.db.add_trade(
+            self.ctx.symbol,
+            ship=s.symbol,
+            good=route.good,
+            buy_at=route.buy_at,
+            sell_at=route.sell_at,
+            units=self._trade_units,
+            cost=self._trade_cost,
+            revenue=earned,
+            predicted_margin=route.margin * self._trade_units,
+            seconds=time.time() - self._trade_started,
+        )
+        await self.ctx.emit(
+            "trade_done",
+            f"{s.symbol} {route.good} {route.buy_at}→{route.sell_at}: {profit:+}c realised "
+            f"(predicted {route.margin * self._trade_units:+}c)",
+            ship=s.symbol,
+            data={"profit": profit, "predicted": route.margin * self._trade_units},
+        )
+        self.status = f"trade done: {profit:+}c"
         return 1
 
     # ---------------------------------------------------------------- haul

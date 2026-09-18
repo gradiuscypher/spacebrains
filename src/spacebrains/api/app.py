@@ -117,6 +117,7 @@ def create_app(cfg: Config) -> FastAPI:
             **ctx.snapshot(),
             "goals": await orch.db.list_goals(symbol, include_inactive=True),
             "strategist_runs": await orch.db.list_strategist_runs(symbol, 8),
+            "trades": await orch.db.list_trades(symbol, 30),
             "snapshots": await orch.db.snapshots(symbol, time.time() - 24 * 3600),
             "overrides_schema": overrides_schema(),
         }

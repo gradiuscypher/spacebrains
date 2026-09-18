@@ -117,7 +117,22 @@ export interface AgentDetail extends AgentSnapshot {
     cost_usd: number
   }[]
   snapshots: { ts: number; credits: number; ships: number }[]
+  trades: Trade[]
   overrides_schema: SchemaField[]
+}
+
+export interface Trade {
+  id: number
+  ts: number
+  ship: string
+  good: string
+  buy_at: string
+  sell_at: string
+  units: number
+  cost: number
+  revenue: number
+  predicted_margin: number
+  seconds: number
 }
 
 export interface UsageRow {

@@ -81,6 +81,21 @@ CREATE TABLE IF NOT EXISTS strategist_runs (
     plan TEXT NOT NULL,
     cost_usd REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS trades (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    agent TEXT NOT NULL,
+    ship TEXT NOT NULL,
+    good TEXT NOT NULL,
+    buy_at TEXT NOT NULL,
+    sell_at TEXT NOT NULL,
+    units INTEGER NOT NULL,
+    cost INTEGER NOT NULL,
+    revenue INTEGER NOT NULL,
+    predicted_margin INTEGER NOT NULL,
+    seconds REAL NOT NULL
+);
+CREATE INDEX IF NOT EXISTS trades_agent ON trades(agent, ts);
 CREATE TABLE IF NOT EXISTS snapshots (
     ts REAL NOT NULL,
     agent TEXT NOT NULL,
@@ -349,6 +364,30 @@ class Database:
             {**dict(r), "models": json.loads(r["models"]), "plan": json.loads(r["plan"])}
             for r in rows
         ]
+
+    async def add_trade(self, agent: str, **row: Any) -> None:
+        cols = [
+            "ship",
+            "good",
+            "buy_at",
+            "sell_at",
+            "units",
+            "cost",
+            "revenue",
+            "predicted_margin",
+            "seconds",
+        ]
+        await self.conn.execute(
+            f"INSERT INTO trades(ts,agent,{','.join(cols)}) VALUES(?,?,{','.join('?' * len(cols))})",
+            (time.time(), agent, *[row[c] for c in cols]),
+        )
+        await self.conn.commit()
+
+    async def list_trades(self, agent: str, limit: int = 50) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM trades WHERE agent=? ORDER BY id DESC LIMIT ?", (agent, limit)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
     async def add_snapshot(self, agent: str, credits: int, ships: int) -> None:
         await self.conn.execute(

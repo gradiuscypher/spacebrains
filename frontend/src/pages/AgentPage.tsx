@@ -198,6 +198,54 @@ export function AgentPage({ symbol, models, onBack }: { symbol: string; models: 
         </div>
       </div>
 
+      {data.trades.length > 0 && (
+        <div className="card">
+          <h2>Trades (realised vs predicted)</h2>
+          <div style={{ overflowX: 'auto' }}>
+            <table>
+              <thead>
+                <tr>
+                  <th>When</th>
+                  <th>Ship</th>
+                  <th>Good</th>
+                  <th>Route</th>
+                  <th className="num">Units</th>
+                  <th className="num">Cost</th>
+                  <th className="num">Revenue</th>
+                  <th className="num">Profit</th>
+                  <th className="num">Predicted</th>
+                  <th className="num">Time</th>
+                </tr>
+              </thead>
+              <tbody>
+                {data.trades.map((t) => {
+                  const profit = t.revenue - t.cost
+                  return (
+                    <tr key={t.id}>
+                      <td>{ago(t.ts)}</td>
+                      <td className="mono">{t.ship}</td>
+                      <td>{t.good}</td>
+                      <td className="mono">
+                        {t.buy_at} → {t.sell_at}
+                      </td>
+                      <td className="num">{t.units}</td>
+                      <td className="num">{fmtCredits(t.cost)}</td>
+                      <td className="num">{fmtCredits(t.revenue)}</td>
+                      <td className="num" style={{ color: profit >= 0 ? 'var(--good)' : 'var(--bad)' }}>
+                        {profit >= 0 ? '+' : ''}
+                        {fmtCredits(profit)}
+                      </td>
+                      <td className="num">{fmtCredits(t.predicted_margin)}</td>
+                      <td className="num">{Math.round(t.seconds / 60)}m</td>
+                    </tr>
+                  )
+                })}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
       <div className="grid two">
         <div className="card">
           <h2>Events</h2>
