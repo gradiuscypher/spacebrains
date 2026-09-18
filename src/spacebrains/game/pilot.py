@@ -768,6 +768,11 @@ class ShipPilot:
             )
             await self.refuel_if_possible()
             return 1
+        if self._trade_units == 0:
+            # Restarted mid-trade: reconstruct the cost side from the route's quoted price.
+            self._trade_units = holding
+            self._trade_cost = holding * route.buy_price
+            self._trade_started = self._trade_started or time.time()
         eta = await self.go_to(route.sell_at)
         if eta is not None:
             return eta
@@ -795,6 +800,8 @@ class ShipPilot:
             data={"profit": profit, "predicted": route.margin * self._trade_units},
         )
         self.status = f"trade done: {profit:+}c"
+        self._trade_units = 0
+        self._trade_cost = 0
         return 1
 
     # ---------------------------------------------------------------- haul
