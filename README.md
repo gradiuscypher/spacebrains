@@ -58,11 +58,14 @@ frontend/          Vite + React + TS dashboard (Overview · Agent · Settings)
 | `contract` | mine (or buy from the cheapest known exporter) the contract good, deliver, fulfill |
 | `mine` | extract at the nearest engineered asteroid, sell at the best known market (Jev picks among the top 3) |
 | `trade` | run the best known buy-low/sell-high route (Jev picks among candidates) |
-| `scout` | visit the stalest marketplace, record prices + shipyard listings (probes do this for free) |
+| `haul` | park in orbit at the mining site; miners transfer cargo in, hauler sells / delivers when full |
+| `scout` | visit the stalest marketplace (home or a gate-connected neighbour), record prices + shipyard listings |
 | `idle` | nothing |
 
-Roles come from, in priority order: operator override (UI) → strategist `role_hints` → Jev
-`assign_roles` (every 5 min, only overrides a strategist hint when confident) → code default.
+Roles come from, in priority order: operator pin (UI, persisted, never overridden) → strategist
+`role_hints` → Jev `assign_roles` (every 5 min, only overrides a strategist hint when confident)
+→ code default. Contracts are always accepted (no penalty for not finishing; an offer blocks
+new negotiations either way) and `contract_economics` decides how hard to work them.
 
 ## Cost controls
 
