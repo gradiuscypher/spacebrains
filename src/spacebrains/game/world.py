@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from spacebrains.db import Database
-from spacebrains.st.client import STClient
+from spacebrains.st.client import STClient, system_of
 from spacebrains.st.models import Market, Shipyard, Waypoint
 
 MINABLE_ORES = {
@@ -96,6 +96,13 @@ class SystemWorld:
     def gas_giants(self) -> list[Waypoint]:
         return [w for w in self.waypoints.values() if w.type == "GAS_GIANT"]
 
+    def gate(self) -> Waypoint | None:
+        return next((w for w in self.waypoints.values() if w.type == "JUMP_GATE"), None)
+
+    def usable_gate(self) -> Waypoint | None:
+        g = self.gate()
+        return g if g is not None and not g.is_under_construction else None
+
     def nearest(self, origin: str, candidates: list[Waypoint]) -> Waypoint | None:
         if not candidates:
             return None
@@ -112,6 +119,8 @@ class World:
     def __init__(self, db: Database) -> None:
         self._db = db
         self.systems: dict[str, SystemWorld] = {}
+        self.connections: dict[str, list[str]] = {}  # gate waypoint -> connected gate waypoints
+        self.gate_failures: dict[str, float] = {}  # gate waypoint -> last failed jump ts
 
     async def load_system(self, client: STClient, system: str) -> SystemWorld:
         sw = self.systems.get(system)
@@ -124,6 +133,63 @@ class World:
             sw.shipyards = cached
         self.systems[system] = sw
         return sw
+
+    async def gate_connections(self, client: STClient, system: str) -> list[str]:
+        sw = await self.load_system(client, system)
+        g = sw.usable_gate()
+        if g is None:
+            return []
+        if g.symbol not in self.connections:
+            cached = await self._db.get_kv(f"gate:{g.symbol}")
+            if cached is None:
+                cached = await client.jump_gate(g.symbol)
+                await self._db.set_kv(f"gate:{g.symbol}", cached)
+            self.connections[g.symbol] = list(cached)
+        return self.connections[g.symbol]
+
+    async def neighbours(self, client: STClient, system: str, limit: int) -> list[str]:
+        """Up to `limit` directly connected systems whose own gate is usable, nearest-listed first."""
+        out: list[str] = []
+        for gate in await self.gate_connections(client, system):
+            if len(out) >= limit:
+                break
+            other = system_of(gate)
+            if other == system:
+                continue
+            sw = await self.load_system(client, other)
+            if (
+                sw.usable_gate() is not None
+                and time.time() - self.gate_failures.get(gate, 0) > 3600
+            ):
+                out.append(other)
+        return out
+
+    async def gate_path(
+        self, client: STClient, src: str, dst: str, max_hops: int = 3
+    ) -> list[str] | None:
+        """Gate waypoints to jump through, from src's gate to dst's gate (BFS, lazy loading)."""
+        if src == dst:
+            return []
+        start = (await self.load_system(client, src)).usable_gate()
+        if start is None:
+            return None
+        frontier: list[list[str]] = [[start.symbol]]
+        seen = {src}
+        for _ in range(max_hops):
+            nxt: list[list[str]] = []
+            for path in frontier:
+                for gate in await self.gate_connections(client, system_of(path[-1])):
+                    other = system_of(gate)
+                    if other in seen or time.time() - self.gate_failures.get(gate, 0) < 3600:
+                        continue
+                    seen.add(other)
+                    if other == dst:
+                        return [*path, gate]
+                    nxt.append([*path, gate])
+            frontier = nxt
+            if not frontier:
+                break
+        return None
 
     async def record_market(self, market: Market) -> None:
         if market.trade_goods:
@@ -156,6 +222,22 @@ class World:
         cutoff = time.time() - MARKET_FRESH_SECONDS
         return [r for r in await self._db.market_rows(system) if r["observed_at"] >= cutoff]
 
+    GATE_LEG_PENALTY = 400.0
+
+    def leg_distance(self, a: str, b: str) -> float:
+        """Intra-system euclidean distance, or gate-to-gate hops for cross-system legs."""
+        sa, sb = system_of(a), system_of(b)
+        if sa == sb:
+            return self.systems[sa].dist(a, b)
+        swa, swb = self.systems[sa], self.systems[sb]
+        ga, gb = swa.gate(), swb.gate()
+        d = self.GATE_LEG_PENALTY
+        if ga is not None:
+            d += swa.dist(a, ga.symbol)
+        if gb is not None:
+            d += swb.dist(gb.symbol, b)
+        return d
+
     async def best_sell_markets(
         self, system: str, goods: list[str], origin: str, limit: int = 3
     ) -> list[dict[str, Any]]:
@@ -184,13 +266,27 @@ class World:
         r = min(rows, key=lambda r: r["buy"])
         return {"waypoint": r["waypoint"], "price": int(r["buy"]), "volume": int(r["volume"] or 0)}
 
-    async def best_routes(self, system: str, capacity: int, limit: int = 5) -> list[TradeRoute]:
-        rows = await self.fresh_rows(system)
-        sw = self.systems[system]
+    async def best_routes(
+        self,
+        system: str,
+        capacity: int,
+        limit: int = 5,
+        extra_systems: list[str] | None = None,
+    ) -> list[TradeRoute]:
+        """Buy-low/sell-high pairs within `system` plus, if given, across `extra_systems`.
+
+        A leg that crosses a gate is charged a flat distance penalty (antimatter + cooldown).
+        """
+        systems = [system, *(extra_systems or [])]
+        rows: list[dict[str, Any]] = []
+        for sy in systems:
+            if sy in self.systems:
+                rows.extend(await self.fresh_rows(sy))
         buys: dict[str, list[dict[str, Any]]] = {}
         sells: dict[str, list[dict[str, Any]]] = {}
         for r in rows:
-            if r["waypoint"] not in sw.waypoints:
+            sy = system_of(r["waypoint"])
+            if r["waypoint"] not in self.systems[sy].waypoints:
                 continue
             if r["kind"] in ("export", "exchange") and r["buy"]:
                 buys.setdefault(r["good"], []).append(r)
@@ -213,7 +309,7 @@ class World:
                             buy_price=int(b["buy"]),
                             sell_price=int(s["sell"]),
                             volume=min(int(b["volume"] or capacity), int(s["volume"] or capacity)),
-                            distance=sw.dist(b["waypoint"], s["waypoint"]),
+                            distance=self.leg_distance(b["waypoint"], s["waypoint"]),
                         )
                     )
         routes.sort(key=lambda r: -(r.margin * min(capacity, r.volume) - r.distance * 2))

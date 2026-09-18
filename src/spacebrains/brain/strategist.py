@@ -88,6 +88,8 @@ Game facts:
 - Ship types buyable at shipyards: SHIP_MINING_DRONE (~cheap, mines), SHIP_LIGHT_HAULER (cargo),
   SHIP_PROBE (scout), SHIP_ORE_HOUND, SHIP_SIPHON_DRONE, SHIP_LIGHT_SHUTTLE. Prices vary by
   shipyard; only buy what the credits comfortably allow while keeping a reserve.
+- Jump gates connect systems (see `neighbour_systems`); scouts rotate through them and traders
+  can run cross-system routes. Jumping costs antimatter and a cooldown.
 - More mining drones early = faster compounding. A SHIP_LIGHT_HAULER in the `haul` role parks at
   the asteroid and collects from the miners so they never stop extracting; with 3+ miners it
   roughly doubles output. Haulers can also `trade` once market spreads are known.

@@ -331,6 +331,16 @@ class STClient:
         body = await self._post("/my/ships", {"shipType": ship_type, "waypointSymbol": waypoint})
         return body["data"]
 
+    async def jump_gate(self, waypoint: str) -> list[str]:
+        """Gate waypoints (in other systems) connected to this JUMP_GATE waypoint."""
+        system = system_of(waypoint)
+        body = await self._get(f"/systems/{system}/waypoints/{waypoint}/jump-gate")
+        return list(body["data"].get("connections", []))
+
+    async def jump(self, ship: str, gate: str) -> dict[str, Any]:
+        """Jump from the gate we orbit to a connected `gate`; buys one antimatter at the market."""
+        return (await self._post(f"/my/ships/{ship}/jump", {"waypointSymbol": gate}))["data"]
+
     async def create_chart(self, ship: str) -> dict[str, Any]:
         return (await self._post(f"/my/ships/{ship}/chart"))["data"]
 

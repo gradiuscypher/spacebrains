@@ -13,7 +13,7 @@ import time
 from typing import TYPE_CHECKING, Any
 
 from spacebrains.game.world import MINABLE_ORES, SIPHONABLE, fuel_cost
-from spacebrains.st.client import STError
+from spacebrains.st.client import STError, system_of
 from spacebrains.st.models import Contract, Ship, Waypoint
 
 if TYPE_CHECKING:
@@ -139,6 +139,10 @@ class ShipPilot:
     async def refresh(self) -> None:
         self.ship = await self.ctx.client.my_ship(self.ship.symbol)
 
+    async def sw(self) -> Any:
+        """World for the system the ship is currently in."""
+        return await self.ctx.world.load_system(self.ctx.client, self.system)
+
     async def wait_arrival(self) -> float:
         return self.ship.nav.seconds_to_arrival() + 1
 
@@ -153,7 +157,7 @@ class ShipPilot:
 
     async def observe_here(self) -> None:
         """Record market/shipyard data for the waypoint we are docked at."""
-        sw = await self.ctx.system_world()
+        sw = await self.sw()
         w = sw.waypoints.get(self.wp)
         if w is None:
             return
@@ -168,7 +172,7 @@ class ShipPilot:
         s = self.ship
         if s.fuel.capacity == 0 or s.fuel.current >= s.fuel.capacity * threshold:
             return
-        sw = await self.ctx.system_world()
+        sw = await self.sw()
         w = sw.waypoints.get(self.wp)
         if w is None or not w.is_market:
             return
@@ -194,7 +198,9 @@ class ShipPilot:
             return None
         if self.ship.nav.status == "IN_TRANSIT":
             return await self.wait_arrival()
-        sw = await self.ctx.system_world()
+        if system_of(waypoint) != self.system:
+            return await self._jump_toward(system_of(waypoint))
+        sw = await self.sw()
         dist = sw.dist(self.wp, waypoint)
         s = self.ship
         mode = "CRUISE"
@@ -219,6 +225,39 @@ class ShipPilot:
             data={"to": waypoint, "mode": mode, "eta": eta},
         )
         return eta + 1
+
+    async def _jump_toward(self, dst_system: str) -> float:
+        """One leg of a cross-system trip: fly to our gate, then jump to the next gate."""
+        path = await self.ctx.world.gate_path(self.ctx.client, self.system, dst_system)
+        if not path:
+            self.status = f"no gate route to {dst_system}"
+            return 300
+        local_gate, next_gate = path[0], path[1]
+        eta = await self.go_to(local_gate)
+        if eta is not None:
+            return eta
+        s = self.ship
+        if s.cooldown_remaining > 0:
+            self.status = f"gate cooldown {int(s.cooldown_remaining)}s"
+            return s.cooldown_remaining + 0.5
+        await self.ensure_orbit()
+        try:
+            data = await self.ctx.client.jump(s.symbol, next_gate)
+        except STError:
+            self.ctx.world.gate_failures[next_gate] = time.time()
+            raise
+        s.nav = s.nav.model_validate(data["nav"])
+        s.cooldown = s.cooldown.model_validate(data["cooldown"])
+        await self.ctx.on_credits(data["agent"]["credits"])
+        tx = data.get("transaction", {})
+        await self.ctx.emit(
+            "jump",
+            f"{s.symbol} jumped {local_gate} → {next_gate} ({tx.get('totalPrice', '?')}c antimatter)",
+            ship=s.symbol,
+            data={"from": local_gate, "to": next_gate, "cost": tx.get("totalPrice")},
+        )
+        self.status = f"jumped to {self.system}"
+        return s.cooldown_remaining + 1
 
     async def sell_cargo(self, keep: set[str] | None = None) -> int:
         """Sell everything the local market takes. Returns credits earned."""
@@ -291,7 +330,7 @@ class ShipPilot:
 
     # ---------------------------------------------------------------- scout
     async def step_scout(self) -> float:
-        sw = await self.ctx.system_world()
+        sw = await self.sw()
         stale = await self.ctx.world.market_staleness(self.system)
         if not stale:
             self.status = "no markets to scout"
@@ -302,6 +341,11 @@ class ShipPilot:
         if target is None or stale.get(target, 0) < 600:
             target = max(stale, key=lambda w: (min(stale[w], 86400 * 30), -sw.dist(here, w)))
             if stale[target] < 600:
+                # This system is fresh: is a neighbouring system staler?
+                away = await self._stalest_neighbour_market()
+                if away is not None:
+                    self.target = away
+                    return await self.go_to(away) or 1
                 self.status = "all markets fresh"
                 return 120
             self.target = target
@@ -316,6 +360,26 @@ class ShipPilot:
         )
         self.target = None
         return 1
+
+    async def _stalest_neighbour_market(self) -> str | None:
+        """A market waypoint in a gate-connected system whose data is stale or missing."""
+        limit = self.ctx.settings.explore_systems
+        if limit <= 0:
+            return None
+        home = self.ctx.home_system
+        systems = [home, *await self.ctx.world.neighbours(self.ctx.client, home, limit)]
+        best: tuple[float, str] | None = None
+        for sy in systems:
+            if sy == self.system:
+                continue
+            stale = await self.ctx.world.market_staleness(sy)
+            if not stale:
+                continue
+            wp = max(stale, key=lambda w: min(stale[w], 86400 * 30))
+            age = min(stale[wp], 86400 * 30)
+            if age >= 3600 and (best is None or age > best[0]):
+                best = (age, wp)
+        return best[1] if best else None
 
     # ---------------------------------------------------------------- mine
     def _mining_target(self, sw: Any) -> Waypoint | None:
@@ -332,7 +396,7 @@ class ShipPilot:
         return sw.nearest(self.wp, engineered or cands)
 
     async def step_mine(self, keep_goods: set[str] | None = None) -> float:
-        sw = await self.ctx.system_world()
+        sw = await self.sw()
         s = self.ship
         if not (s.can_mine or s.can_siphon):
             self.set_role("scout", "no mining mount")
@@ -452,7 +516,7 @@ class ShipPilot:
         return moved
 
     async def _sell_trip(self, keep: set[str]) -> float:
-        sw = await self.ctx.system_world()
+        sw = await self.sw()
         goods = [i.symbol for i in self.ship.cargo.inventory if i.symbol not in keep]
         if not goods:
             return 5
@@ -543,7 +607,7 @@ class ShipPilot:
             updated = await self.ctx.client.deliver_contract(contract.id, s.symbol, good, units)
             self.ctx.update_contract(updated)
             await self.refresh()
-            sw = await self.ctx.system_world()
+            sw = await self.sw()
             if s.cargo.units > 0 and sw.waypoints[self.wp].is_market:
                 await self.sell_cargo(keep={good})
             await self.refuel_if_possible()
@@ -599,7 +663,7 @@ class ShipPilot:
         )
         self.ctx.request_replan("contract fulfilled")
         # Close the loop right here if the drop-off point has a faction presence.
-        sw = await self.ctx.system_world()
+        sw = await self.sw()
         w = sw.waypoints.get(self.wp)
         if w is not None and w.faction is not None and self.ship.nav.status == "DOCKED":
             await self.ctx.try_negotiate(self)
@@ -627,7 +691,12 @@ class ShipPilot:
             return 1
         route = self.ctx.trade_plans.get(s.symbol)
         if route is None:
-            routes = await self.ctx.world.best_routes(self.system, s.cargo.capacity)
+            extra = await self.ctx.world.neighbours(
+                self.ctx.client, self.ctx.home_system, self.ctx.settings.explore_systems
+            )
+            routes = await self.ctx.world.best_routes(
+                self.system, s.cargo.capacity, extra_systems=[*extra, self.ctx.home_system]
+            )
             routes = [r for r in routes if r.margin * min(s.cargo.capacity, r.volume) > 1500]
             if not routes:
                 self.status = "no profitable route known"
@@ -772,7 +841,7 @@ class ShipPilot:
                 )
                 self.ctx.update_contract(updated)
                 await self.refresh()
-                sw = await self.ctx.system_world()
+                sw = await self.sw()
                 if s.cargo.units > 0 and sw.waypoints[self.wp].is_market:
                     await self.sell_cargo(keep=keep)
                 await self.refuel_if_possible()

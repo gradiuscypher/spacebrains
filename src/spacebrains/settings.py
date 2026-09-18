@@ -59,6 +59,12 @@ class Settings(BaseModel):
         default=20_000, ge=0, description="Credits kept back from ship purchases and trade buys."
     )
     max_agents: int = Field(default=3, ge=1, le=20)
+    explore_systems: int = Field(
+        default=2,
+        ge=0,
+        le=6,
+        description="Neighbouring systems (via jump gate) scouts may cover and traders may use. 0 = home only.",
+    )
     paused: bool = Field(default=False, description="Pause every agent's game loop.")
 
 
@@ -72,6 +78,7 @@ class AgentOverrides(BaseModel):
     jev_enabled: bool | None = None
     max_ships_to_buy: int | None = Field(default=None, ge=0, le=50)
     min_credit_reserve: int | None = Field(default=None, ge=0)
+    explore_systems: int | None = Field(default=None, ge=0, le=6)
     paused: bool | None = None
     operator_notes: str = Field(
         default="",

@@ -734,6 +734,7 @@ class AgentContext:
                 },
             },
             "market_knowledge": await self.situation(),
+            "neighbour_systems": await self.neighbour_summary(),
             "current_goals": [
                 {"kind": g["kind"], "description": g["description"], "priority": g["priority"]}
                 for g in goals
@@ -741,6 +742,35 @@ class AgentContext:
             "recent_events": [e["message"][:120] for e in events],
             "last_plan_error": self.plan_error,
         }
+
+    async def neighbour_summary(self) -> dict[str, Any]:
+        out: dict[str, Any] = {}
+        sw = await self.system_world()
+        gate = sw.gate()
+        out["home_gate"] = (
+            None
+            if gate is None
+            else f"{gate.symbol} ({'under construction' if gate.is_under_construction else 'usable'})"
+        )
+        try:
+            systems = await self.world.neighbours(
+                self.client, self.home_system, self.settings.explore_systems
+            )
+        except STError as e:
+            out["error"] = e.message
+            return out
+        for sy in systems:
+            stale = await self.world.market_staleness(sy)
+            nsw = self.world.systems[sy]
+            out[sy] = {
+                "markets": f"{sum(1 for v in stale.values() if v < 3 * 3600)}/{len(stale)} fresh",
+                "shipyards": {
+                    wp: [f"{x['type']}={x.get('price')}" for x in listings][:6]
+                    for wp, listings in nsw.shipyards.items()
+                },
+                "asteroids": len(nsw.asteroids()),
+            }
+        return out
 
     def snapshot(self) -> dict[str, Any]:
         return {
