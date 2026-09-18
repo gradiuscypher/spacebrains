@@ -1,0 +1,19 @@
+# systemd unit: copy to /etc/systemd/system/spacebrains.service, then
+#   sudo systemctl daemon-reload && sudo systemctl enable --now spacebrains
+# Adjust User/WorkingDirectory. Expects .env and a built frontend/dist in WorkingDirectory.
+[Unit]
+Description=spacebrains - autonomous SpaceTraders fleet
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gradius
+WorkingDirectory=/home/gradius/git/spacebrains
+ExecStart=/opt/uv/uv run spacebrains
+Restart=always
+RestartSec=5
+Environment=PYTHONUNBUFFERED=1
+
+[Install]
+WantedBy=multi-user.target

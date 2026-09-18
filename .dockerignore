@@ -1,0 +1,9 @@
+.git
+.venv
+node_modules
+frontend/node_modules
+frontend/dist
+data
+.env
+server.log
+.claude
