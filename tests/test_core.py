@@ -145,3 +145,25 @@ async def test_rate_limiter_is_fair_between_keys():
     assert small_positions[0] <= 2
     assert small_positions[1] <= 4
     assert set(rl.stats(60)) == {"big", "small"}
+
+
+def test_plan_route_uses_fuel_stops():
+    sw = SystemWorld(symbol="X1-T", loaded_at=time.time())
+    sw.waypoints = {
+        "X1-T-AST": _wp("X1-T-AST", 0, 0, [], "ENGINEERED_ASTEROID"),
+        "X1-T-FUEL": _wp("X1-T-FUEL", 60, 0, ["MARKETPLACE"]),
+        "X1-T-FAR": _wp("X1-T-FAR", 130, 0, ["MARKETPLACE"]),
+        "X1-T-NOWHERE": _wp("X1-T-NOWHERE", 0, 500, ["MARKETPLACE"]),
+    }
+    sw.fuel_stops = {"X1-T-FUEL"}
+    # 80-fuel drone: cannot cruise 130 straight, but can hop via the fuel stop.
+    assert sw.plan_route("X1-T-AST", "X1-T-FAR", 80, 80) == (["X1-T-FUEL", "X1-T-FAR"], 130.0)
+    # Direct when in range.
+    assert sw.plan_route("X1-T-AST", "X1-T-FUEL", 80, 80) == (["X1-T-FUEL"], 60.0)
+    # Low tank: the first hop must fit the current fuel.
+    assert sw.plan_route("X1-T-AST", "X1-T-FAR", 30, 80) is None
+    # Unreachable -> None, and route_distance penalises it heavily.
+    assert sw.plan_route("X1-T-AST", "X1-T-NOWHERE", 80, 80) is None
+    assert sw.route_distance("X1-T-AST", "X1-T-NOWHERE", 80, 80) > 1000
+    # Probes fly direct.
+    assert sw.plan_route("X1-T-AST", "X1-T-NOWHERE", 0, 0) == (["X1-T-NOWHERE"], 500.0)

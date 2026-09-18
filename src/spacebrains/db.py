@@ -81,6 +81,19 @@ CREATE TABLE IF NOT EXISTS strategist_runs (
     plan TEXT NOT NULL,
     cost_usd REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS outcomes (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    agent TEXT NOT NULL,
+    ship TEXT NOT NULL,
+    kind TEXT NOT NULL,
+    key TEXT NOT NULL,
+    ok INTEGER NOT NULL,
+    seconds REAL NOT NULL,
+    credits INTEGER NOT NULL,
+    note TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX IF NOT EXISTS outcomes_agent_kind ON outcomes(agent, kind, ts);
 CREATE TABLE IF NOT EXISTS decisions (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -375,6 +388,38 @@ class Database:
             {**dict(r), "models": json.loads(r["models"]), "plan": json.loads(r["plan"])}
             for r in rows
         ]
+
+    async def add_outcome(
+        self,
+        agent: str,
+        *,
+        ship: str,
+        kind: str,
+        key: str,
+        ok: bool,
+        seconds: float,
+        credits: int,
+        note: str,
+    ) -> None:
+        await self.conn.execute(
+            "INSERT INTO outcomes(ts,agent,ship,kind,key,ok,seconds,credits,note)"
+            " VALUES(?,?,?,?,?,?,?,?,?)",
+            (time.time(), agent, ship, kind, key, int(ok), seconds, credits, note),
+        )
+        await self.conn.commit()
+
+    async def list_outcomes(
+        self, agent: str, *, kind: str | None = None, since_ts: float = 0, limit: int = 300
+    ) -> list[dict[str, Any]]:
+        q = "SELECT * FROM outcomes WHERE agent=? AND ts>=?"
+        params: list[Any] = [agent, since_ts]
+        if kind:
+            q += " AND kind=?"
+            params.append(kind)
+        q += " ORDER BY id DESC LIMIT ?"
+        params.append(limit)
+        async with self.conn.execute(q, params) as cur:
+            return [dict(r) for r in await cur.fetchall()]
 
     async def add_decisions(
         self, agent: str, rows: list[tuple[str, str, str, float | None, int]]

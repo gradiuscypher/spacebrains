@@ -8,7 +8,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from spacebrains.db import Database
-from spacebrains.st.client import STClient, system_of
+from spacebrains.st.client import STClient, STError, system_of
 from spacebrains.st.models import Market, Shipyard, Waypoint
 
 MINABLE_ORES = {
@@ -79,6 +79,7 @@ class SystemWorld:
     symbol: str
     waypoints: dict[str, Waypoint] = field(default_factory=dict)
     shipyards: dict[str, list[dict[str, Any]]] = field(default_factory=dict)  # wp -> listings
+    fuel_stops: set[str] = field(default_factory=set)  # markets that trade FUEL
     loaded_at: float = 0.0
 
     def wp(self, symbol: str) -> Waypoint:
@@ -102,6 +103,56 @@ class SystemWorld:
     def usable_gate(self) -> Waypoint | None:
         g = self.gate()
         return g if g is not None and not g.is_under_construction else None
+
+    def plan_route(
+        self, origin: str, dest: str, fuel_now: int, fuel_cap: int
+    ) -> tuple[list[str], float] | None:
+        """Shortest CRUISE route from origin to dest, refuelling to full at fuel stops.
+
+        Returns (waypoints to visit in order, total distance) or None if unreachable without
+        drifting. A ship with no fuel tank (probe) flies direct.
+        """
+        if origin == dest:
+            return [], 0.0
+        if fuel_cap == 0:
+            return [dest], self.dist(origin, dest)
+        # Dijkstra over origin + fuel stops + dest; leaving a fuel stop we have a full tank.
+        nodes = {origin, dest, *self.fuel_stops}
+        best: dict[str, float] = {origin: 0.0}
+        prev: dict[str, str] = {}
+        done: set[str] = set()
+        while True:
+            open_nodes = [n for n in best if n not in done]
+            if not open_nodes:
+                break
+            u = min(open_nodes, key=lambda n: best[n])
+            if u == dest:
+                break
+            done.add(u)
+            tank = fuel_now if u == origin else fuel_cap
+            for v in nodes:
+                if v in done or v == u:
+                    continue
+                d = self.dist(u, v)
+                if fuel_cost(d, "CRUISE") > tank:
+                    continue
+                if best[u] + d < best.get(v, math.inf):
+                    best[v] = best[u] + d
+                    prev[v] = u
+        if dest not in best:
+            return None
+        path: list[str] = []
+        cur = dest
+        while cur != origin:
+            path.append(cur)
+            cur = prev[cur]
+        path.reverse()
+        return path, best[dest]
+
+    def route_distance(self, origin: str, dest: str, fuel_now: int, fuel_cap: int) -> float:
+        """Distance via fuel stops, or a heavy penalty when it would need a drift."""
+        planned = self.plan_route(origin, dest, fuel_now, fuel_cap)
+        return planned[1] if planned else self.dist(origin, dest) * 8
 
     def nearest(self, origin: str, candidates: list[Waypoint]) -> Waypoint | None:
         if not candidates:
@@ -131,6 +182,19 @@ class World:
         cached = await self._db.get_kv(f"shipyards:{system}")
         if cached:
             sw.shipyards = cached
+        fuel = await self._db.get_kv(f"fuel_stops:{system}")
+        if fuel is None:
+            # Market good lists are visible without a ship present; one call per market, cached.
+            fuel = []
+            for w in sw.markets():
+                try:
+                    market = await client.market(w.symbol)
+                except STError:
+                    continue
+                if "FUEL" in market.all_goods():
+                    fuel.append(w.symbol)
+            await self._db.set_kv(f"fuel_stops:{system}", fuel)
+        sw.fuel_stops = set(fuel)
         self.systems[system] = sw
         return sw
 

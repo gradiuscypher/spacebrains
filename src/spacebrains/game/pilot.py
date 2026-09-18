@@ -12,7 +12,7 @@ import logging
 import time
 from typing import TYPE_CHECKING, Any
 
-from spacebrains.game.world import MINABLE_ORES, SIPHONABLE, fuel_cost
+from spacebrains.game.world import MINABLE_ORES, SIPHONABLE
 from spacebrains.st.client import STError, system_of
 from spacebrains.st.models import Contract, Ship, Waypoint
 
@@ -40,6 +40,10 @@ class ShipPilot:
         self.in_step = False
         self.needs_refresh = False  # another pilot changed our cargo (transfer)
         self.last_buy_cost = 0
+        self.stint_started = time.time()
+        self.stint_revenue = 0
+        self.stint_errors = 0
+        self._trip_started: float | None = None
         self._trade_started = 0.0
         self._trade_cost = 0
         self._trade_units = 0
@@ -59,10 +63,37 @@ class ShipPilot:
 
     def set_role(self, role: Role, source: str) -> None:
         if role != self.role:
+            old = self.role
             self.role = role
             self.role_source = source
             self.target = None
+            if old != "idle" or self.stint_revenue:
+                self.ctx.schedule(self.flush_stint(force=True, ended_role=old))
             self._wake.set()
+
+    async def flush_stint(self, *, force: bool, ended_role: str | None = None) -> None:
+        """Record what the current role stint produced. Periodic (every 30 min) or on change."""
+        seconds = time.time() - self.stint_started
+        if not force and seconds < 1800:
+            return
+        role = ended_role or self.role
+        if seconds < 60 and not force:
+            return
+        per_hour = self.stint_revenue / max(seconds / 3600, 1 / 60)
+        support = role in ("scout", "haul", "idle", "contract")
+        ok = self.stint_errors < 3 and (support or per_hour >= 1500 or seconds < 900)
+        await self.ctx.memory.record(
+            "role",
+            role,
+            ship=self.ship.symbol,
+            ok=ok,
+            seconds=seconds,
+            credits=self.stint_revenue,
+            note=f"{int(per_hour)}c/h, {self.stint_errors} errors",
+        )
+        self.stint_started = time.time()
+        self.stint_revenue = 0
+        self.stint_errors = 0
 
     def snapshot(self) -> dict[str, Any]:
         s = self.ship
@@ -105,6 +136,7 @@ class ShipPilot:
                 delay = await self.step()
             except STError as e:
                 self.last_error = e.message
+                self.stint_errors += 1
                 self.status = f"error: {e.message[:80]}"
                 await self.ctx.emit(
                     "error", f"{self.ship.symbol}: {e.message}", ship=self.ship.symbol
@@ -203,28 +235,45 @@ class ShipPilot:
         if system_of(waypoint) != self.system:
             return await self._jump_toward(system_of(waypoint))
         sw = await self.sw()
-        dist = sw.dist(self.wp, waypoint)
         s = self.ship
+        # Top up whenever we're sitting at a fuel stop, so route planning can assume full tanks.
+        if self.wp in sw.fuel_stops:
+            await self.refuel_if_possible(threshold=0.95)
         mode = "CRUISE"
+        next_hop = waypoint
         if s.fuel.capacity > 0:
-            need = fuel_cost(dist, "CRUISE")
-            if s.fuel.current < need:
-                await self.refuel_if_possible(threshold=1.0)
-            if s.fuel.current < need:
+            planned = sw.plan_route(self.wp, waypoint, s.fuel.current, s.fuel.capacity)
+            if planned and planned[0]:
+                next_hop = planned[0][0]
+                if len(planned[0]) > 1:
+                    self.status = f"→ {waypoint} via {next_hop} (fuel stop)"
+            else:
+                # Unreachable even with fuel stops: drift as a last resort and remember it.
                 mode = "DRIFT"
+                await self.ctx.memory.record(
+                    "nav",
+                    waypoint,
+                    ship=s.symbol,
+                    ok=False,
+                    seconds=0,
+                    credits=0,
+                    note="needed DRIFT (no fuel route)",
+                )
+        dist = sw.dist(self.wp, next_hop)
         if s.nav.flight_mode != mode:
             s.nav = await self.ctx.client.set_flight_mode(s.symbol, mode)
         await self.ensure_orbit()
-        data = await self.ctx.client.navigate(s.symbol, waypoint)
+        data = await self.ctx.client.navigate(s.symbol, next_hop)
         s.nav = s.nav.model_validate(data["nav"])
         s.fuel.current = data["fuel"]["current"]
         eta = s.nav.seconds_to_arrival()
-        self.status = f"→ {waypoint} ({mode.lower()}, {int(eta)}s)"
+        via = "" if next_hop == waypoint else f" via {next_hop}"
+        self.status = f"→ {waypoint}{via} ({mode.lower()}, {int(eta)}s)"
         await self.ctx.emit(
             "navigate",
-            f"{s.symbol} → {waypoint} in {mode} ({int(eta)}s)",
+            f"{s.symbol} → {waypoint}{via} in {mode} ({int(eta)}s, {int(dist)} units)",
             ship=s.symbol,
-            data={"to": waypoint, "mode": mode, "eta": eta},
+            data={"to": waypoint, "hop": next_hop, "mode": mode, "eta": eta},
         )
         return eta + 1
 
@@ -280,6 +329,7 @@ class ShipPilot:
                 self.ship.cargo = cargo
                 remaining -= units
                 earned += tx.total_price
+                self.stint_revenue += tx.total_price
                 await self.ctx.on_credits(agent.credits)
             await self.ctx.emit(
                 "sell",
@@ -525,7 +575,20 @@ class ShipPilot:
         if not goods:
             return 5
         if self.target is None:
-            options = await self.ctx.world.best_sell_markets(self.system, goods, self.wp)
+            self._trip_started = time.time()
+            options = await self.ctx.world.best_sell_markets(self.system, goods, self.wp, limit=5)
+            blocked = await self.ctx.memory.blocked("sell_market")
+            options = [o for o in options if o["waypoint"] not in blocked] or options
+            # Rank by the fuel-aware route distance, not straight-line.
+            for o in options:
+                o["route_distance"] = round(
+                    sw.route_distance(
+                        self.wp, o["waypoint"], self.ship.fuel.current, self.ship.fuel.capacity
+                    )
+                )
+            options.sort(key=lambda o: (-o["covers"], o["route_distance"]))
+            options = options[:3]
+            history = await self.ctx.memory.stats("sell_market")
             choice: str | None = None
             if len(options) > 1 and self.ctx.jev_enabled:
                 picked = await self.ctx.jev.choose_option(
@@ -537,13 +600,18 @@ class ShipPilot:
                     ),
                     situation={
                         "cargo": {i.symbol: i.units for i in self.ship.cargo.inventory},
-                        "fuel": self.ship.fuel.current,
+                        "fuel": f"{self.ship.fuel.current}/{self.ship.fuel.capacity}",
                         "options": options,
+                        "recent_outcomes": {
+                            o["waypoint"]: history.get(o["waypoint"]) for o in options
+                        },
+                        "rule": "route_distance already accounts for fuel stops; a trip over ~600 units is a bad pick",
                     },
                     options={
-                        o[
-                            "waypoint"
-                        ]: f"sells {o['covers']} of our goods, {o['distance']} units away, prices {o['prices']}"
+                        o["waypoint"]: (
+                            f"sells {o['covers']} of our goods, route {o['route_distance']} units, "
+                            f"prices {o['prices']}"
+                        )
                         for o in options
                     },
                 )
@@ -573,6 +641,17 @@ class ShipPilot:
                 self.target = others[0]["waypoint"]
                 return 1
         self.status = f"sold cargo at {self.wp} for {earned}c"
+        trip = time.time() - (self._trip_started or time.time())
+        await self.ctx.memory.record(
+            "sell_market",
+            self.wp,
+            ship=self.ship.symbol,
+            ok=earned > 0 and trip < 1500,
+            seconds=trip,
+            credits=earned,
+            note=f"{int(trip)}s trip",
+        )
+        self._trip_started = None
         self.target = None
         return 1
 
@@ -665,6 +744,7 @@ class ShipPilot:
             ship=self.ship.symbol,
             data={"contract": contract.id, "payout": contract.terms.payment.on_fulfilled},
         )
+        self.stint_revenue += contract.terms.payment.on_fulfilled
         self.ctx.request_replan("contract fulfilled")
         # Close the loop right here if the drop-off point has a faction presence.
         sw = await self.sw()
@@ -684,6 +764,7 @@ class ShipPilot:
             await self.ctx.on_credits(agent.credits)
             bought += chunk
             self.last_buy_cost += tx.total_price
+            self.stint_revenue -= tx.total_price
             units -= chunk
         return bought
 
@@ -702,6 +783,8 @@ class ShipPilot:
                 self.system, s.cargo.capacity, extra_systems=[*extra, self.ctx.home_system]
             )
             routes = [r for r in routes if r.margin * min(s.cargo.capacity, r.volume) > 1500]
+            blocked = await self.ctx.memory.blocked("trade_route")
+            routes = [r for r in routes if route_key(r) not in blocked]
             if not routes:
                 self.status = "no profitable route known"
                 self.set_role("mine" if s.can_mine else "scout", "no trade route")
@@ -719,6 +802,11 @@ class ShipPilot:
                         "cargo_capacity": s.cargo.capacity,
                         "credits": self.ctx.credits,
                         "routes": [r.as_dict() for r in routes],
+                        "recent_outcomes": {
+                            route_key(r): h
+                            for r in routes
+                            if (h := (await self.ctx.memory.stats("trade_route")).get(route_key(r)))
+                        },
                     },
                     options={f"{r.good}@{r.buy_at}": str(r.as_dict()) for r in routes},
                 )
@@ -800,6 +888,15 @@ class ShipPilot:
             data={"profit": profit, "predicted": route.margin * self._trade_units},
         )
         self.status = f"trade done: {profit:+}c"
+        await self.ctx.memory.record(
+            "trade_route",
+            route_key(route),
+            ship=s.symbol,
+            ok=profit > 0,
+            seconds=time.time() - self._trade_started,
+            credits=profit,
+            note=f"{self._trade_units} units",
+        )
         self._trade_units = 0
         self._trade_cost = 0
         return 1
@@ -928,6 +1025,10 @@ class ShipPilot:
         elif kind == "repair":
             await self.maybe_repair()
         return 1
+
+
+def route_key(r: Any) -> str:
+    return f"{r.good} {r.buy_at}->{r.sell_at}"
 
 
 def now() -> float:

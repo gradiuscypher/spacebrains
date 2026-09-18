@@ -110,6 +110,9 @@ class JevBrain:
                 "there are two or more miners; otherwise as a trader.",
                 "Trading needs fresh price data with a real spread; otherwise mining is safer.",
                 "Do not leave every ship idle when there is any productive option.",
+                "`situation.recent_outcomes` shows what each role/ship actually earned recently; "
+                "prefer what has been working and move ships off roles with poor or failed "
+                "outcomes. Anything listed under `blocked` is currently unavailable.",
             ],
         }
         questions: dict[str, Any] = {}

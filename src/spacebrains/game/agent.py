@@ -19,6 +19,7 @@ from spacebrains.brain.openrouter import BudgetExceededError
 from spacebrains.brain.strategist import Plan, Strategist
 from spacebrains.db import AgentRow, Database
 from spacebrains.events import EventBus
+from spacebrains.game.memory import TacticalMemory
 from spacebrains.game.pilot import ShipPilot
 from spacebrains.game.world import MINABLE_ORES, SIPHONABLE, SystemWorld, TradeRoute, World
 from spacebrains.settings import AgentOverrides, Settings, effective
@@ -51,6 +52,7 @@ class AgentContext:
         self.strategist = strategist
         self._global = global_settings
         self.overrides = AgentOverrides.model_validate(row.overrides)
+        self.memory = TacticalMemory(db, row.symbol)
 
         self.agent: Agent | None = None
         self.credits = 0
@@ -394,6 +396,11 @@ class AgentContext:
         c = self.active_contract()
         return {d.trade_symbol for d in c.terms.deliver if d.remaining > 0} if c else set()
 
+    def schedule(self, coro: Any) -> None:
+        """Run a coroutine in the background from synchronous code (errors are logged)."""
+        task = asyncio.create_task(coro)
+        task.add_done_callback(lambda t: t.exception() if not t.cancelled() else None)
+
     def request_replan(self, reason: str) -> None:
         self.replan_reason = reason
 
@@ -411,6 +418,8 @@ class AgentContext:
         if now - self._snapshot_ts >= 30:
             await self.db.add_snapshot(self.symbol, self.credits, len(self.pilots))
             self._snapshot_ts = now
+        for p in self.pilots.values():
+            await p.flush_stint(force=False)
         await self.release_expired_pins()
         await self.maybe_accept_contract()
         await self.maybe_negotiate_contract()
@@ -598,6 +607,7 @@ class AgentContext:
                     p.set_role(self.default_role(p), "heuristic")
             return
         goals = await self.db.list_goals(self.symbol)
+        memory = await self.memory.summary()
         picks = await self.jev.assign_roles(
             agent=self.symbol,
             fleet=[p.snapshot() for p in self.pilots.values()],
@@ -605,7 +615,14 @@ class AgentContext:
                 {"kind": g["kind"], "description": g["description"], "priority": g["priority"]}
                 for g in goals
             ],
-            context=await self.situation(),
+            context={
+                **await self.situation(),
+                "recent_outcomes": {
+                    "per_role": memory["roles"],
+                    "per_ship": memory["ship_history"],
+                    "blocked": memory["blocked"],
+                },
+            },
             allowed=allowed,
         )
         changed = []
@@ -790,6 +807,7 @@ class AgentContext:
             },
             "market_knowledge": await self.situation(),
             "neighbour_systems": await self.neighbour_summary(),
+            "tactical_memory": await self.memory.summary(),
             "current_goals": [
                 {"kind": g["kind"], "description": g["description"], "priority": g["priority"]}
                 for g in goals
