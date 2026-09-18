@@ -449,8 +449,11 @@ class ShipPilot:
         have = self.ship.cargo.units_of(good)
         s = self.ship
 
-        # Deliver when we have a meaningful load or the remainder.
-        if have > 0 and (have >= deliverable.remaining or s.cargo.free < 3):
+        # Deliver when we can finish the contract or the hold is mostly contract goods;
+        # if the hold is full of by-catch instead, sell that first and keep mining.
+        full = s.cargo.free < 3
+        deliver_now = have >= deliverable.remaining or self.wp == dest
+        if have > 0 and (deliver_now or (full and have >= s.cargo.units * 0.5)):
             eta = await self.go_to(dest)
             if eta is not None:
                 return eta
@@ -459,6 +462,10 @@ class ShipPilot:
             updated = await self.ctx.client.deliver_contract(contract.id, s.symbol, good, units)
             self.ctx.update_contract(updated)
             await self.refresh()
+            sw = await self.ctx.system_world()
+            if s.cargo.units > 0 and sw.waypoints[self.wp].is_market:
+                await self.sell_cargo(keep={good})
+            await self.refuel_if_possible()
             await self.ctx.emit(
                 "deliver",
                 f"{s.symbol} delivered {units} {good} to {dest}",
@@ -471,8 +478,8 @@ class ShipPilot:
 
         can_mine_it = (good in MINABLE_ORES and s.can_mine) or (good in SIPHONABLE and s.can_siphon)
         if can_mine_it:
-            # Sell non-contract cargo before it clogs the hold, then keep mining.
-            if s.cargo.free < 3 and have < s.cargo.units:
+            # Sell by-catch before it clogs the hold, then keep mining.
+            if full and have < s.cargo.units:
                 return await self._sell_trip(keep={good})
             return await self.step_mine(keep_goods={good})
 
@@ -568,8 +575,6 @@ class ShipPilot:
             )
         holding = s.cargo.units_of(route.good)
         if holding == 0:
-            if s.cargo.units > 0:  # stray cargo: dump it at the buy market first
-                pass
             eta = await self.go_to(route.buy_at)
             if eta is not None:
                 return eta
