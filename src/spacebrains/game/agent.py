@@ -67,7 +67,9 @@ class AgentContext:
         self._negotiate_ts = 0.0
         self._known_export_goods: set[str] = set()
         self.surveys: list[Survey] = []
-        self.operator_roles: dict[str, str] = {}
+        # ship -> {"role", "until_credits"?, "until_ts"?}; a pin with a condition releases
+        # itself (back to automatic roles + a re-plan) once the condition is met.
+        self.operator_roles: dict[str, dict[str, Any]] = {}
         self._agent_refreshed_ts = 0.0
         self._fleet_synced_ts = 0.0
         self._snapshot_ts = 0.0
@@ -134,7 +136,10 @@ class AgentContext:
         await self.world.load_system(self.client, self.agent.headquarters.rsplit("-", 1)[0])
         await self.refresh_contracts()
         await self.restore_plan()
-        self.operator_roles = await self.db.get_kv(f"operator_roles:{self.symbol}") or {}
+        stored = await self.db.get_kv(f"operator_roles:{self.symbol}") or {}
+        self.operator_roles = {
+            k: (v if isinstance(v, dict) else {"role": v}) for k, v in stored.items()
+        }
         await self.sync_fleet()
         await self.emit("start", f"agent online with {len(self.pilots)} ships and {self.credits}c")
 
@@ -191,7 +196,7 @@ class AgentContext:
                 pilot = ShipPilot(self, ship)
                 self.pilots[ship.symbol] = pilot
                 hint = self.plan.role_hints.get(ship.symbol) if self.plan else None
-                pinned = self.operator_roles.get(ship.symbol)
+                pinned = (self.operator_roles.get(ship.symbol) or {}).get("role")
                 if pinned and pinned in self.allowed_roles(pilot):
                     pilot.set_role(pinned, "operator")
                 elif hint and hint in self.allowed_roles(pilot):
@@ -336,15 +341,58 @@ class AgentContext:
                 return p  # here but docked / mid-step; usable shortly
         return None
 
-    async def set_operator_role(self, pilot: ShipPilot, role: str | None) -> None:
-        """Pin (or with None, unpin) a ship's role from the UI; persisted across restarts."""
+    async def set_operator_role(
+        self,
+        pilot: ShipPilot,
+        role: str | None,
+        *,
+        until_credits: int | None = None,
+        until_minutes: float | None = None,
+    ) -> None:
+        """Pin (or with None, unpin) a ship's role from the UI; persisted across restarts.
+
+        With `until_credits` / `until_minutes` the pin is temporary: it releases itself when the
+        agent's credits reach the target or the time elapses, and the strategist re-plans.
+        """
         if role is None:
             self.operator_roles.pop(pilot.ship.symbol, None)
             pilot.set_role(self.default_role(pilot), "default")
         else:
-            self.operator_roles[pilot.ship.symbol] = role
+            pin: dict[str, Any] = {"role": role}
+            if until_credits:
+                pin["until_credits"] = int(until_credits)
+            if until_minutes:
+                pin["until_ts"] = time.time() + float(until_minutes) * 60
+            self.operator_roles[pilot.ship.symbol] = pin
             pilot.set_role(role, "operator")
         await self.db.set_kv(f"operator_roles:{self.symbol}", self.operator_roles)
+
+    async def release_expired_pins(self) -> None:
+        for sym, pin in list(self.operator_roles.items()):
+            pilot = self.pilots.get(sym)
+            if pilot is None:
+                continue
+            reason = None
+            if pin.get("until_credits") and self.credits >= int(pin["until_credits"]):
+                reason = f"credits reached {self.credits:,}"
+            elif pin.get("until_ts") and time.time() >= float(pin["until_ts"]):
+                reason = "time limit reached"
+            if reason is None:
+                continue
+            # Let an in-flight trade finish: release only when the hold is empty of trade goods.
+            if pilot.role == "trade" and sym in self.trade_plans:
+                continue
+            await self.set_operator_role(pilot, None)
+            await self.emit(
+                "roles",
+                f"released {sym} from pinned '{pin['role']}' ({reason}); back to automatic roles",
+                ship=sym,
+            )
+            self.request_replan(f"pin released on {sym}")
+
+    def contract_goods(self) -> set[str]:
+        c = self.active_contract()
+        return {d.trade_symbol for d in c.terms.deliver if d.remaining > 0} if c else set()
 
     def request_replan(self, reason: str) -> None:
         self.replan_reason = reason
@@ -363,6 +411,7 @@ class AgentContext:
         if now - self._snapshot_ts >= 30:
             await self.db.add_snapshot(self.symbol, self.credits, len(self.pilots))
             self._snapshot_ts = now
+        await self.release_expired_pins()
         await self.maybe_accept_contract()
         await self.maybe_negotiate_contract()
         await self.maybe_replan()

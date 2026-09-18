@@ -90,6 +90,7 @@ class ShipPilot:
             "can_siphon": s.can_siphon,
             "speed": s.engine.speed,
             "last_error": self.last_error,
+            "pin": self.ctx.operator_roles.get(s.symbol),
         }
 
     async def _run(self) -> None:
@@ -740,7 +741,7 @@ class ShipPilot:
             if eta is not None:
                 return eta
             await self.ensure_docked()
-            await self.sell_cargo()
+            await self.sell_cargo(keep=self.ctx.contract_goods())
             market = await self.ctx.client.market(self.wp)
             await self.ctx.world.record_market(market)
             good = next((g for g in market.trade_goods or [] if g.symbol == route.good), None)
@@ -770,7 +771,7 @@ class ShipPilot:
         eta = await self.go_to(route.sell_at)
         if eta is not None:
             return eta
-        earned = await self.sell_cargo()
+        earned = await self.sell_cargo(keep=self.ctx.contract_goods())
         await self.refuel_if_possible()
         self.ctx.trade_plans.pop(s.symbol, None)
         profit = earned - self._trade_cost

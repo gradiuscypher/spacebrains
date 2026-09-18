@@ -9,10 +9,11 @@ const ROLES = ['contract', 'mine', 'trade', 'scout', 'haul', 'idle']
 
 function ShipRow({ s, agent, onChanged }: { s: Ship; agent: string; onChanged: () => void }) {
   const [busy, setBusy] = useState(false)
+  const [untilCredits, setUntilCredits] = useState<string>(s.pin?.until_credits ? String(s.pin.until_credits) : '')
   const setRole = async (role: string) => {
     setBusy(true)
     try {
-      await api.setRole(agent, s.symbol, role)
+      await api.setRole(agent, s.symbol, role, { until_credits: untilCredits ? Number(untilCredits) : undefined })
       onChanged()
     } catch (e) {
       alert((e as Error).message)
@@ -42,6 +43,20 @@ function ShipRow({ s, agent, onChanged }: { s: Ship; agent: string; onChanged: (
           ))}
         </select>
         <div className="sub">via {s.role_source}</div>
+        <div className="row" style={{ marginTop: 4 }}>
+          <input
+            type="number"
+            placeholder="until credits ≥"
+            title="Optional: release the pin back to automatic roles once the agent's credits reach this"
+            value={untilCredits}
+            style={{ width: 130, fontSize: 12 }}
+            onChange={(e) => setUntilCredits(e.target.value)}
+            onBlur={() => {
+              if (s.role_source === 'operator') void setRole(s.role)
+            }}
+          />
+        </div>
+        {s.pin?.until_credits ? <div className="sub">releases at {fmtCredits(s.pin.until_credits)}</div> : null}
       </td>
       <td>
         <div>{s.status}</div>

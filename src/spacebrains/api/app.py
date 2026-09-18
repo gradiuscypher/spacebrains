@@ -165,20 +165,32 @@ def create_app(cfg: Config) -> FastAPI:
         return {"ok": "1"}
 
     @app.post("/api/agents/{symbol}/ships/{ship}/role")
-    async def set_role(symbol: str, ship: str, body: dict[str, str]) -> dict[str, str]:
+    async def set_role(symbol: str, ship: str, body: dict[str, Any]) -> dict[str, str]:
         ctx = _agent(orch, symbol)
         pilot = ctx.pilots.get(ship)
         if pilot is None:
             raise HTTPException(404, "no such ship")
-        role = body.get("role", "")
+        role = str(body.get("role", ""))
         if role == "auto":
             await ctx.set_operator_role(pilot, None)
             await ctx.emit("roles", f"operator released {ship} to automatic roles", ship=ship)
             return {"ok": "1"}
         if role not in ctx.allowed_roles(pilot):
             raise HTTPException(400, f"role must be one of {ctx.allowed_roles(pilot)}")
-        await ctx.set_operator_role(pilot, role)
-        await ctx.emit("roles", f"operator pinned {ship} → {role}", ship=ship)
+        until_credits = body.get("until_credits") or None
+        until_minutes = body.get("until_minutes") or None
+        await ctx.set_operator_role(
+            pilot,
+            role,
+            until_credits=int(until_credits) if until_credits else None,
+            until_minutes=float(until_minutes) if until_minutes else None,
+        )
+        cond = ""
+        if until_credits:
+            cond += f" until credits ≥ {int(until_credits):,}"
+        if until_minutes:
+            cond += f" for {until_minutes} min"
+        await ctx.emit("roles", f"operator pinned {ship} → {role}{cond}", ship=ship)
         return {"ok": "1"}
 
     @app.delete("/api/agents/{symbol}")

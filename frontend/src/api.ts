@@ -44,6 +44,7 @@ export interface Ship {
   cargo: { units: number; capacity: number; inventory: Record<string, number> }
   cooldown: number
   condition: number
+  pin: { role: string; until_credits?: number; until_ts?: number } | null
   can_mine: boolean
   can_siphon: boolean
   last_error: string | null
@@ -216,8 +217,8 @@ export const api = {
   setEnabled: (symbol: string, enabled: boolean) =>
     req(`/api/agents/${symbol}/enabled`, { method: 'POST', body: JSON.stringify({ enabled }) }),
   replan: (symbol: string) => req(`/api/agents/${symbol}/replan`, { method: 'POST' }),
-  setRole: (symbol: string, ship: string, role: string) =>
-    req(`/api/agents/${symbol}/ships/${ship}/role`, { method: 'POST', body: JSON.stringify({ role }) }),
+  setRole: (symbol: string, ship: string, role: string, opts: { until_credits?: number; until_minutes?: number } = {}) =>
+    req(`/api/agents/${symbol}/ships/${ship}/role`, { method: 'POST', body: JSON.stringify({ role, ...opts }) }),
   remove: (symbol: string) => req(`/api/agents/${symbol}`, { method: 'DELETE' }),
   ackReset: () => req('/api/reset/acknowledge', { method: 'POST' }),
   comparison: (hours = 24) =>
