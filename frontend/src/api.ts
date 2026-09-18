@@ -11,6 +11,7 @@ export interface Settings {
   jev_model: string
   jev_enabled: boolean
   tick_seconds: number
+  allow_ship_purchases: boolean
   max_ships_to_buy: number
   min_credit_reserve: number
   max_agents: number
@@ -119,7 +120,18 @@ export interface AgentDetail extends AgentSnapshot {
   }[]
   snapshots: { ts: number; credits: number; ships: number }[]
   trades: Trade[]
+  decisions: Decision[]
   overrides_schema: SchemaField[]
+}
+
+export interface Decision {
+  id: number
+  ts: number
+  purpose: string
+  question: string
+  answer: string
+  confidence: number | null
+  input_tokens: number
 }
 
 export interface Trade {
@@ -208,6 +220,10 @@ export const api = {
     req(`/api/agents/${symbol}/ships/${ship}/role`, { method: 'POST', body: JSON.stringify({ role }) }),
   remove: (symbol: string) => req(`/api/agents/${symbol}`, { method: 'DELETE' }),
   ackReset: () => req('/api/reset/acknowledge', { method: 'POST' }),
+  comparison: (hours = 24) =>
+    req<{ agents: { symbol: string; models: string; starting_credits: number; points: { ts: number; credits: number }[] }[] }>(
+      `/api/comparison?hours=${hours}`,
+    ),
   events: (agent?: string, limit = 200) =>
     req<GameEvent[]>(`/api/events?limit=${limit}${agent ? `&agent=${agent}` : ''}`),
 }

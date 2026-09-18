@@ -1,7 +1,8 @@
 import { useState } from 'react'
 import { api, fmtCredits, fmtUsd, type AgentSnapshot, type Overview } from '../api'
-import { useEvents } from '../hooks'
+import { useEvents, usePoll } from '../hooks'
 import { EventFeed } from '../components/EventFeed'
+import { ComparisonChart } from '../components/ComparisonChart'
 
 const FACTIONS = ['COSMIC', 'VOID', 'GALACTIC', 'QUANTUM', 'DOMINION', 'ASTRO', 'CORSAIRS', 'OBSIDIAN', 'AEGIS', 'UNITED']
 
@@ -100,6 +101,7 @@ function AddAgent({ onDone }: { onDone: () => void }) {
 
 export function OverviewPage({ data, reload, onOpen }: { data: Overview | null; reload: () => void; onOpen: (s: string) => void }) {
   const { events, live } = useEvents(undefined, 150)
+  const comparison = usePoll(() => api.comparison(24), 30000)
   if (!data) return <div className="muted">Loading…</div>
   const budget = data.settings.monthly_llm_budget_usd
   const spent = data.usage.month_openrouter_usd
@@ -188,6 +190,13 @@ export function OverviewPage({ data, reload, onOpen }: { data: Overview | null; 
           </div>
         </div>
       </div>
+
+      {data.agents.length > 1 && comparison.data && (
+        <div className="card">
+          <h2>Model comparison · credits since start (24h)</h2>
+          <ComparisonChart series={comparison.data.agents} />
+        </div>
+      )}
 
       <div className="grid cards">
         {data.agents.map((a) => (

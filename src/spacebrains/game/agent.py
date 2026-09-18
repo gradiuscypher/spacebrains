@@ -571,6 +571,8 @@ class AgentContext:
     async def maybe_buy_ship(self) -> None:
         if not self.purchase_pending or self.plan is None or self.plan.ship_purchase is None:
             return
+        if not self.settings.allow_ship_purchases:
+            return
         if any(p.errand for p in self.pilots.values()):
             return
         req = self.plan.ship_purchase

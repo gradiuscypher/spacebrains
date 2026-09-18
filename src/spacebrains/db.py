@@ -81,6 +81,17 @@ CREATE TABLE IF NOT EXISTS strategist_runs (
     plan TEXT NOT NULL,
     cost_usd REAL NOT NULL
 );
+CREATE TABLE IF NOT EXISTS decisions (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts REAL NOT NULL,
+    agent TEXT NOT NULL,
+    purpose TEXT NOT NULL,
+    question TEXT NOT NULL,
+    answer TEXT NOT NULL,
+    confidence REAL,
+    input_tokens INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS decisions_agent ON decisions(agent, ts);
 CREATE TABLE IF NOT EXISTS trades (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     ts REAL NOT NULL,
@@ -364,6 +375,33 @@ class Database:
             {**dict(r), "models": json.loads(r["models"]), "plan": json.loads(r["plan"])}
             for r in rows
         ]
+
+    async def add_decisions(
+        self, agent: str, rows: list[tuple[str, str, str, float | None, int]]
+    ) -> None:
+        """rows: (purpose, question, answer, confidence, input_tokens)."""
+        now = time.time()
+        await self.conn.executemany(
+            "INSERT INTO decisions(ts,agent,purpose,question,answer,confidence,input_tokens)"
+            " VALUES(?,?,?,?,?,?,?)",
+            [(now, agent, *r) for r in rows],
+        )
+        await self.conn.commit()
+
+    async def list_decisions(self, agent: str, limit: int = 60) -> list[dict[str, Any]]:
+        async with self.conn.execute(
+            "SELECT * FROM decisions WHERE agent=? ORDER BY id DESC LIMIT ?", (agent, limit)
+        ) as cur:
+            return [dict(r) for r in await cur.fetchall()]
+
+    async def all_snapshots(self, since_ts: float) -> dict[str, list[dict[str, Any]]]:
+        async with self.conn.execute(
+            "SELECT agent,ts,credits FROM snapshots WHERE ts>=? ORDER BY ts", (since_ts,)
+        ) as cur:
+            out: dict[str, list[dict[str, Any]]] = {}
+            for r in await cur.fetchall():
+                out.setdefault(r["agent"], []).append({"ts": r["ts"], "credits": r["credits"]})
+        return out
 
     async def add_trade(self, agent: str, **row: Any) -> None:
         cols = [

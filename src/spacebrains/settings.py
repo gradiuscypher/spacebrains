@@ -52,6 +52,9 @@ class Settings(BaseModel):
 
     # --- Game loop ---
     tick_seconds: float = Field(default=5.0, ge=1, le=60, description="Per-agent loop cadence.")
+    allow_ship_purchases: bool = Field(
+        default=True, description="When off, the strategist's ship-purchase requests are ignored."
+    )
     max_ships_to_buy: int = Field(
         default=6, ge=0, le=50, description="Fleet size cap the strategist may not exceed."
     )
@@ -76,6 +79,7 @@ class AgentOverrides(BaseModel):
     thinking_rounds: int | None = Field(default=None, ge=1, le=5)
     strategist_interval_minutes: float | None = Field(default=None, ge=1, le=1440)
     jev_enabled: bool | None = None
+    allow_ship_purchases: bool | None = None
     max_ships_to_buy: int | None = Field(default=None, ge=0, le=50)
     min_credit_reserve: int | None = Field(default=None, ge=0)
     explore_systems: int | None = Field(default=None, ge=0, le=6)

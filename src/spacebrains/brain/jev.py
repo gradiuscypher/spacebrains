@@ -59,6 +59,20 @@ class JevBrain:
             return None
         in_tok = resp.usage.input_tokens or 0
         out_tok = resp.usage.output_tokens or 0
+        rows: list[tuple[str, str, str, float | None, int]] = []
+        for qid, q in questions.items():
+            instr = getattr(q, "instructions", "")
+            question = f"{qid}: {instr}" if isinstance(instr, str) else qid
+            if qid in resp.choices:
+                a = resp.choices[qid]
+                rows.append((purpose, question, a.choice, float(a.confidence), in_tok))
+            elif qid in resp.nouls:
+                rows.append((purpose, question, f"p(yes)={resp.nouls[qid].noul:.2f}", None, in_tok))
+            elif qid in resp.scores:
+                sc = resp.scores[qid]
+                rows.append((purpose, question, f"{sc.score:.2f}", float(sc.confidence), in_tok))
+        if rows:
+            await self._db.add_decisions(agent, rows)
         await self._db.add_usage(
             agent=agent,
             provider="typesafe",

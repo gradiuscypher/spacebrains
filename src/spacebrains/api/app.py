@@ -65,6 +65,22 @@ def create_app(cfg: Config) -> FastAPI:
         except ValueError as e:
             raise HTTPException(400, str(e)) from e
 
+    @app.get("/api/comparison")
+    async def comparison(hours: float = 24) -> dict[str, Any]:
+        """Credits over time for every agent, for the overview comparison chart."""
+        series = await orch.db.all_snapshots(time.time() - hours * 3600)
+        return {
+            "agents": [
+                {
+                    "symbol": a.symbol,
+                    "starting_credits": a.starting_credits,
+                    "models": f"{a.settings.strategist_model} / {a.settings.critic_model}",
+                    "points": series.get(a.symbol, []),
+                }
+                for a in orch.agents.values()
+            ]
+        }
+
     @app.get("/api/usage")
     async def usage() -> dict[str, Any]:
         month = time.time() - 31 * 86400
@@ -123,6 +139,7 @@ def create_app(cfg: Config) -> FastAPI:
             "goals": await orch.db.list_goals(symbol, include_inactive=True),
             "strategist_runs": await orch.db.list_strategist_runs(symbol, 8),
             "trades": await orch.db.list_trades(symbol, 30),
+            "decisions": await orch.db.list_decisions(symbol, 60),
             "snapshots": await orch.db.snapshots(symbol, time.time() - 24 * 3600),
             "overrides_schema": overrides_schema(),
         }

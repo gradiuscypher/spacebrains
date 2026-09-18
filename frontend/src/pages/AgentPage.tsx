@@ -275,6 +275,22 @@ export function AgentPage({ symbol, models, onBack }: { symbol: string; models: 
             />
           </div>
           <div className="card">
+            <h2>Jev decisions</h2>
+            {data.decisions.length === 0 && <div className="muted">None yet.</div>}
+            <div className="events">
+              {data.decisions.map((d) => (
+                <div className="ev" key={d.id} title={d.question}>
+                  <span className="t">{ago(d.ts)}</span>
+                  <span className="k">{d.purpose}</span>
+                  <span>
+                    {d.question.split(':')[0]} → <b>{d.answer}</b>
+                    {d.confidence !== null ? <span className="muted"> ({Math.round(d.confidence * 100)}%)</span> : null}
+                  </span>
+                </div>
+              ))}
+            </div>
+          </div>
+          <div className="card">
             <h2>Strategist history</h2>
             {data.strategist_runs.length === 0 && <div className="muted">No runs yet.</div>}
             {data.strategist_runs.map((r) => (
