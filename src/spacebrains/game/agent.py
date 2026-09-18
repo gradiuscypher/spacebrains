@@ -743,9 +743,11 @@ class AgentContext:
             f"bought {ship_type} ({data['ship']['symbol']}) for {tx.get('price')}c",
             data={"type": ship_type, "ship": data["ship"]["symbol"], "price": tx.get("price")},
         )
-        assert self.plan and self.plan.ship_purchase
-        self.plan.ship_purchase.count -= 1
-        if self.plan.ship_purchase.count <= 0:
+        if self.plan and self.plan.ship_purchase:
+            self.plan.ship_purchase.count -= 1
+            if self.plan.ship_purchase.count <= 0:
+                self.purchase_pending = False
+        else:  # plan changed while the errand was in flight
             self.purchase_pending = False
         await self.sync_fleet()
         self._fleet_synced_ts = time.time()
