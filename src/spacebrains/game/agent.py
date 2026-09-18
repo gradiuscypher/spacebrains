@@ -124,9 +124,22 @@ class AgentContext:
         self.starting_credits = self.credits
         assert self.agent is not None
         await self.world.load_system(self.client, self.agent.headquarters.rsplit("-", 1)[0])
-        await self.sync_fleet()
         await self.refresh_contracts()
+        await self.restore_plan()
+        await self.sync_fleet()
         await self.emit("start", f"agent online with {len(self.pilots)} ships and {self.credits}c")
+
+    async def restore_plan(self) -> None:
+        """Resume the last persisted plan so a restart does not cost a strategist call."""
+        runs = await self.db.list_strategist_runs(self.symbol, 1)
+        if not runs:
+            return
+        try:
+            self.plan = Plan.model_validate(runs[0]["plan"])
+        except ValueError:
+            return
+        self.plan_ts = float(runs[0]["ts"])
+        self.purchase_pending = False  # never resume a purchase blindly after a restart
 
     # ---------------------------------------------------------------- state
     async def emit(
@@ -168,7 +181,11 @@ class AgentContext:
             if pilot is None:
                 pilot = ShipPilot(self, ship)
                 self.pilots[ship.symbol] = pilot
-                pilot.set_role(self.default_role(pilot), "default")
+                hint = self.plan.role_hints.get(ship.symbol) if self.plan else None
+                if hint and hint in self.allowed_roles(pilot):
+                    pilot.set_role(hint, "strategist")
+                else:
+                    pilot.set_role(self.default_role(pilot), "default")
                 pilot.start()
             elif not pilot.in_step and ship.nav.status != "IN_TRANSIT":
                 pilot.ship = ship  # only while the pilot is sleeping; it owns state mid-step
