@@ -317,6 +317,16 @@ class STClient:
         ]
         return ShipCargo.model_validate(data["cargo"])
 
+    async def transfer(self, ship: str, symbol: str, units: int, to_ship: str) -> ShipCargo:
+        """Move cargo from `ship` to `to_ship`; both must share a waypoint and nav status."""
+        data = (
+            await self._post(
+                f"/my/ships/{ship}/transfer",
+                {"tradeSymbol": symbol, "units": units, "shipSymbol": to_ship},
+            )
+        )["data"]
+        return ShipCargo.model_validate(data["cargo"])
+
     async def purchase_ship(self, ship_type: str, waypoint: str) -> dict[str, Any]:
         body = await self._post("/my/ships", {"shipType": ship_type, "waypointSymbol": waypoint})
         return body["data"]

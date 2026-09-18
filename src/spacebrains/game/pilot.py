@@ -22,7 +22,7 @@ if TYPE_CHECKING:
 log = logging.getLogger("spacebrains.pilot")
 
 Role = str
-ALL_ROLES: tuple[Role, ...] = ("contract", "mine", "trade", "scout", "idle")
+ALL_ROLES: tuple[Role, ...] = ("contract", "mine", "trade", "scout", "haul", "idle")
 
 
 class ShipPilot:
@@ -36,6 +36,8 @@ class ShipPilot:
         self.last_error: str | None = None
         self.purchase_request: tuple[str, str] | None = None  # (ship_type, shipyard wp)
         self.in_step = False
+        self.needs_refresh = False  # another pilot changed our cargo (transfer)
+        self._wait_since: float | None = None
         self._task: asyncio.Task[None] | None = None
         self._wake = asyncio.Event()
 
@@ -262,6 +264,9 @@ class ShipPilot:
                 return eta + 1
             await self.refresh()
             await self.refuel_if_possible()
+        if self.needs_refresh:
+            self.needs_refresh = False
+            await self.refresh()
         if self.purchase_request:
             return await self.step_purchase()
         handler = {
@@ -269,6 +274,7 @@ class ShipPilot:
             "mine": self.step_mine,
             "trade": self.step_trade,
             "scout": self.step_scout,
+            "haul": self.step_haul,
             "idle": self.step_idle,
         }.get(self.role, self.step_idle)
         return await handler()
@@ -326,7 +332,7 @@ class ShipPilot:
             self.set_role("scout", "no mining mount")
             return 1
         if s.cargo.units >= s.cargo.capacity * 0.9 or (s.cargo.free < 3 and s.cargo.units > 0):
-            return await self._sell_trip(keep_goods or set())
+            return await self._unload(keep_goods or set())
         target = self._mining_target(sw)
         if target is None:
             self.status = "no asteroid in system"
@@ -378,6 +384,66 @@ class ShipPilot:
             persist=False,
         )
         return s.cooldown_remaining + 0.5
+
+    async def _unload(self, keep: set[str]) -> float:
+        """Hand cargo to a hauler parked here if there is one; otherwise go sell it ourselves.
+
+        `keep` goods are contract goods: a hauler takes those too (it delivers them), but a
+        solo sell trip keeps them aboard.
+        """
+        hauler = self.ctx.hauler_at(self.wp)
+        if hauler is not None and hauler.ship.cargo.free > 0:
+            moved = await self._transfer_to(hauler)
+            if moved:
+                self._wait_since = None
+                return 1
+        inbound = self.ctx.hauler_inbound(self.wp)
+        if inbound is not None:
+            # A shuttle is on its way: wait a bounded time rather than leave the asteroid.
+            if self._wait_since is None:
+                self._wait_since = time.time()
+            if time.time() - self._wait_since < 240:
+                self.status = f"full, waiting for hauler {inbound.ship.symbol}"
+                return 20
+        self._wait_since = None
+        return await self._sell_trip(keep)
+
+    async def _transfer_to(self, hauler: ShipPilot) -> int:
+        await self.ensure_orbit()
+        moved = 0
+        for item in list(self.ship.cargo.inventory):
+            units = min(item.units, hauler.ship.cargo.free)
+            if units <= 0:
+                break
+            try:
+                self.ship.cargo = await self.ctx.client.transfer(
+                    self.ship.symbol, item.symbol, units, hauler.ship.symbol
+                )
+            except STError as e:
+                if e.code in (4217, 4218, 4219, 4234):  # hauler full / not here / status mismatch
+                    hauler.needs_refresh = True
+                    break
+                raise
+            hauler.ship.cargo.units += units
+            existing = next(
+                (i for i in hauler.ship.cargo.inventory if i.symbol == item.symbol), None
+            )
+            if existing:
+                existing.units += units
+            else:
+                hauler.ship.cargo.inventory.append(item.model_copy(update={"units": units}))
+            hauler.needs_refresh = True
+            moved += units
+        if moved:
+            self.status = f"handed {moved} units to {hauler.ship.symbol}"
+            await self.ctx.emit(
+                "transfer",
+                f"{self.ship.symbol} transferred {moved} units to {hauler.ship.symbol} at {self.wp}",
+                ship=self.ship.symbol,
+                data={"to": hauler.ship.symbol, "units": moved},
+                persist=False,
+            )
+        return moved
 
     async def _sell_trip(self, keep: set[str]) -> float:
         sw = await self.ctx.system_world()
@@ -452,6 +518,15 @@ class ShipPilot:
         # Deliver when we can finish the contract or the hold is mostly contract goods;
         # if the hold is full of by-catch instead, sell that first and keep mining.
         full = s.cargo.free < 3
+        hauler = self.ctx.hauler_at(self.wp)
+        can_hand_off = full and hauler is not None and hauler.ship.cargo.free > 0
+        if (
+            can_hand_off
+            and hauler is not None
+            and self.wp != dest
+            and await self._transfer_to(hauler)
+        ):
+            return 1
         deliver_now = have >= deliverable.remaining or self.wp == dest
         if have > 0 and (deliver_now or (full and have >= s.cargo.units * 0.5)):
             eta = await self.go_to(dest)
@@ -480,7 +555,7 @@ class ShipPilot:
         if can_mine_it:
             # Sell by-catch before it clogs the hold, then keep mining.
             if full and have < s.cargo.units:
-                return await self._sell_trip(keep={good})
+                return await self._unload(keep={good})
             return await self.step_mine(keep_goods={good})
 
         source = await self.ctx.world.cheapest_source(self.system, good)
@@ -609,6 +684,79 @@ class ShipPilot:
         self.ctx.trade_plans.pop(s.symbol, None)
         self.status = f"trade done: +{earned}c"
         return 1
+
+    # ---------------------------------------------------------------- haul
+    async def step_haul(self) -> float:
+        s = self.ship
+        if s.cargo.capacity == 0:
+            self.set_role("scout", "no cargo hold")
+            return 1
+        hub = self.ctx.mining_hub()
+        if hub is None:
+            self.set_role("trade", "no miners to shuttle for")
+            return 1
+        contract = self.ctx.active_contract()
+        keep: set[str] = set()
+        contract_good: str | None = None
+        dest: str | None = None
+        remaining = 0
+        if contract is not None:
+            d = next((d for d in contract.terms.deliver if d.remaining > 0), None)
+            if d is not None:
+                contract_good, dest, remaining = d.trade_symbol, d.destination_symbol, d.remaining
+                keep = {contract_good}
+        have = s.cargo.units_of(contract_good) if contract_good else 0
+
+        # Dispose when full, or when we've been holding a partial load with nothing coming.
+        idle_miners = not self.ctx.miners_with_cargo(hub)
+        holding_long = (
+            s.cargo.units > 0
+            and self._wait_since is not None
+            and time.time() - self._wait_since > 300
+            and idle_miners
+        )
+        if s.cargo.free < 3 or holding_long or (contract_good and have >= remaining > 0):
+            self._wait_since = None
+            if (
+                contract is not None
+                and contract_good
+                and dest
+                and (have >= remaining or have >= s.cargo.capacity * 0.4)
+            ):
+                eta = await self.go_to(dest)
+                if eta is not None:
+                    return eta
+                await self.ensure_docked()
+                units = min(have, remaining)
+                updated = await self.ctx.client.deliver_contract(
+                    contract.id, s.symbol, contract_good, units
+                )
+                self.ctx.update_contract(updated)
+                await self.refresh()
+                sw = await self.ctx.system_world()
+                if s.cargo.units > 0 and sw.waypoints[self.wp].is_market:
+                    await self.sell_cargo(keep=keep)
+                await self.refuel_if_possible()
+                await self.ctx.emit(
+                    "deliver",
+                    f"{s.symbol} (hauler) delivered {units} {contract_good} to {dest}",
+                    ship=s.symbol,
+                    data={"good": contract_good, "units": units},
+                )
+                if all(d.remaining <= 0 for d in updated.terms.deliver):
+                    return await self._fulfill(updated)
+                return 1
+            if any(i.symbol not in keep for i in s.cargo.inventory):
+                return await self._sell_trip(keep)
+        eta = await self.go_to(hub)
+        if eta is not None:
+            self.status = f"hauler → {hub}"
+            return eta
+        await self.ensure_orbit()
+        if self._wait_since is None:
+            self._wait_since = time.time()
+        self.status = f"collecting at {hub} ({s.cargo.units}/{s.cargo.capacity})"
+        return 20
 
     # ---------------------------------------------------------------- purchase
     async def step_purchase(self) -> float:

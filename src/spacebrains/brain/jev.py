@@ -24,6 +24,10 @@ ROLE_CRITERIA: dict[str, str] = {
     ),
     "mine": "Extract ore at an asteroid and sell it at the best nearby market.",
     "trade": "Run the best known buy-low/sell-high route between markets in the system.",
+    "haul": (
+        "Shuttle: wait in orbit at the mining site, collect cargo from the miners so they never "
+        "stop extracting, then sell it (or deliver contract goods) and return."
+    ),
     "scout": "Visit marketplaces to refresh price data (ideal for probes and idle ships).",
     "idle": "Stay put and do nothing this cycle.",
 }
@@ -87,6 +91,8 @@ class JevBrain:
             "rules": [
                 "Contracts pay well and expire; prioritise them while deliverable.",
                 "Probes cannot carry cargo or mine, they should scout markets.",
+                "A cargo ship without a mining laser is most valuable as a haul shuttle when "
+                "there are two or more miners; otherwise as a trader.",
                 "Trading needs fresh price data with a real spread; otherwise mining is safer.",
                 "Do not leave every ship idle when there is any productive option.",
             ],

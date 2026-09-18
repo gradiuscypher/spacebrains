@@ -61,7 +61,7 @@ class Plan(_ClampedText):
     assessment: str = ""
     goals: list[Goal] = Field(default_factory=list, max_length=8)
     ship_purchase: ShipPurchase | None = None
-    role_hints: dict[str, Literal["contract", "mine", "trade", "scout", "idle"]] = Field(
+    role_hints: dict[str, Literal["contract", "mine", "trade", "scout", "haul", "idle"]] = Field(
         default_factory=dict
     )
     notes_for_next_time: str = ""
@@ -86,7 +86,9 @@ Game facts:
 - Ship types buyable at shipyards: SHIP_MINING_DRONE (~cheap, mines), SHIP_LIGHT_HAULER (cargo),
   SHIP_PROBE (scout), SHIP_ORE_HOUND, SHIP_SIPHON_DRONE, SHIP_LIGHT_SHUTTLE. Prices vary by
   shipyard; only buy what the credits comfortably allow while keeping a reserve.
-- More mining drones early = faster compounding; haulers matter once trade spreads are known.
+- More mining drones early = faster compounding. A SHIP_LIGHT_HAULER in the `haul` role parks at
+  the asteroid and collects from the miners so they never stop extracting; with 3+ miners it
+  roughly doubles output. Haulers can also `trade` once market spreads are known.
 
 Output ONLY a JSON object of this shape:
 {
@@ -96,7 +98,7 @@ Output ONLY a JSON object of this shape:
      "description": "specific, checkable", "priority": 1-10, "params": {}}
   ],
   "ship_purchase": {"ship_type": "SHIP_MINING_DRONE", "count": 1, "reason": "", "when_credits_above": 0} or null,
-  "role_hints": {"SHIP-SYMBOL": "contract|mine|trade|scout|idle"},
+  "role_hints": {"SHIP-SYMBOL": "contract|mine|trade|scout|haul|idle"},
   "notes_for_next_time": "short memo to your future self"
 }
 Keep it concise. At most 6 goals. Use real ship symbols and waypoint symbols from the summary."""

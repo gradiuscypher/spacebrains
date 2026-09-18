@@ -254,6 +254,9 @@ main {
 .pill.role-trade {
   color: var(--good);
 }
+.pill.role-haul {
+  color: #1baf7a;
+}
 .pill.role-scout {
   color: #9085e9;
 }

@@ -5,7 +5,7 @@ import { EventFeed } from '../components/EventFeed'
 import { CreditsChart } from '../components/CreditsChart'
 import { SettingsForm } from '../components/SettingsForm'
 
-const ROLES = ['contract', 'mine', 'trade', 'scout', 'idle']
+const ROLES = ['contract', 'mine', 'trade', 'scout', 'haul', 'idle']
 
 function ShipRow({ s, agent, onChanged }: { s: Ship; agent: string; onChanged: () => void }) {
   const [busy, setBusy] = useState(false)

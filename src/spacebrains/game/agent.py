@@ -200,10 +200,14 @@ class AgentContext:
         s = pilot.ship
         if s.is_probe or s.cargo.capacity == 0:
             return "scout"
+        if s.can_mine or s.can_siphon:
+            if self.active_contract() is not None and self.can_work_contract(pilot):
+                return "contract"
+            return "mine"
+        if len(self.miners()) >= 2:
+            return "haul"
         if self.active_contract() is not None and self.can_work_contract(pilot):
             return "contract"
-        if s.can_mine or s.can_siphon:
-            return "mine"
         return "trade"
 
     def allowed_roles(self, pilot: ShipPilot) -> list[str]:
@@ -211,6 +215,8 @@ class AgentContext:
         roles = ["idle", "scout"]
         if s.cargo.capacity > 0:
             roles.append("trade")
+            if not (s.can_mine or s.can_siphon):
+                roles.append("haul")
         if s.can_mine or s.can_siphon:
             roles.append("mine")
         if self.active_contract() is not None and self.can_work_contract(pilot):
@@ -269,6 +275,57 @@ class AgentContext:
             return (hits / max(len(deposits), 1), size_rank.get(x.size, 0))
 
         return max(surveys, key=score)
+
+    # ---------------------------------------------------------------- hauling
+    def miners(self) -> list[ShipPilot]:
+        return [
+            p
+            for p in self.pilots.values()
+            if p.role in ("mine", "contract") and (p.ship.can_mine or p.ship.can_siphon)
+        ]
+
+    def mining_hub(self) -> str | None:
+        """The waypoint most miners are working (or heading to)."""
+        sw = self.world.systems.get(self.home_system)
+        if sw is None:
+            return None
+        counts: dict[str, int] = {}
+        for p in self.miners():
+            nav = p.ship.nav
+            wp = nav.route.destination.symbol if nav.status == "IN_TRANSIT" else nav.waypoint_symbol
+            w = sw.waypoints.get(wp)
+            if w is not None and (w.is_asteroid or w.type == "GAS_GIANT"):
+                counts[wp] = counts.get(wp, 0) + 1
+        return max(counts, key=lambda k: counts[k]) if counts else None
+
+    def miners_with_cargo(self, waypoint: str) -> list[ShipPilot]:
+        return [
+            p
+            for p in self.miners()
+            if p.ship.nav.waypoint_symbol == waypoint and p.ship.cargo.units > 0
+        ]
+
+    def hauler_at(self, waypoint: str) -> ShipPilot | None:
+        for p in self.pilots.values():
+            if (
+                p.role == "haul"
+                and p.ship.nav.status == "IN_ORBIT"
+                and p.ship.nav.waypoint_symbol == waypoint
+                and p.ship.cargo.free > 0
+            ):
+                return p
+        return None
+
+    def hauler_inbound(self, waypoint: str) -> ShipPilot | None:
+        for p in self.pilots.values():
+            if p.role != "haul":
+                continue
+            nav = p.ship.nav
+            if nav.status == "IN_TRANSIT" and nav.route.destination.symbol == waypoint:
+                return p
+            if nav.waypoint_symbol == waypoint and p.ship.cargo.free > 0:
+                return p  # here but docked / mid-step; usable shortly
+        return None
 
     def request_replan(self, reason: str) -> None:
         self.replan_reason = reason
