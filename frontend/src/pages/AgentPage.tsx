@@ -32,9 +32,12 @@ function ShipRow({ s, agent, onChanged }: { s: Ship; agent: string; onChanged: (
         </div>
       </td>
       <td>
-        <select value={s.role} disabled={busy} onChange={(e) => void setRole(e.target.value)}>
+        <select value={s.role_source === 'operator' ? s.role : 'auto'} disabled={busy} onChange={(e) => void setRole(e.target.value)}>
+          <option value="auto">auto ({s.role})</option>
           {ROLES.map((r) => (
-            <option key={r}>{r}</option>
+            <option key={r} value={r}>
+              pin: {r}
+            </option>
           ))}
         </select>
         <div className="sub">via {s.role_source}</div>

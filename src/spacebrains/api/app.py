@@ -149,10 +149,14 @@ def create_app(cfg: Config) -> FastAPI:
         if pilot is None:
             raise HTTPException(404, "no such ship")
         role = body.get("role", "")
+        if role == "auto":
+            await ctx.set_operator_role(pilot, None)
+            await ctx.emit("roles", f"operator released {ship} to automatic roles", ship=ship)
+            return {"ok": "1"}
         if role not in ctx.allowed_roles(pilot):
             raise HTTPException(400, f"role must be one of {ctx.allowed_roles(pilot)}")
-        pilot.set_role(role, "operator")
-        await ctx.emit("roles", f"operator set {ship} → {role}", ship=ship)
+        await ctx.set_operator_role(pilot, role)
+        await ctx.emit("roles", f"operator pinned {ship} → {role}", ship=ship)
         return {"ok": "1"}
 
     @app.delete("/api/agents/{symbol}")

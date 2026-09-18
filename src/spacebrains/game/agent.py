@@ -67,6 +67,7 @@ class AgentContext:
         self._negotiate_ts = 0.0
         self._known_export_goods: set[str] = set()
         self.surveys: list[Survey] = []
+        self.operator_roles: dict[str, str] = {}
         self._agent_refreshed_ts = 0.0
         self._fleet_synced_ts = 0.0
         self._snapshot_ts = 0.0
@@ -129,6 +130,7 @@ class AgentContext:
         await self.world.load_system(self.client, self.agent.headquarters.rsplit("-", 1)[0])
         await self.refresh_contracts()
         await self.restore_plan()
+        self.operator_roles = await self.db.get_kv(f"operator_roles:{self.symbol}") or {}
         await self.sync_fleet()
         await self.emit("start", f"agent online with {len(self.pilots)} ships and {self.credits}c")
 
@@ -185,7 +187,10 @@ class AgentContext:
                 pilot = ShipPilot(self, ship)
                 self.pilots[ship.symbol] = pilot
                 hint = self.plan.role_hints.get(ship.symbol) if self.plan else None
-                if hint and hint in self.allowed_roles(pilot):
+                pinned = self.operator_roles.get(ship.symbol)
+                if pinned and pinned in self.allowed_roles(pilot):
+                    pilot.set_role(pinned, "operator")
+                elif hint and hint in self.allowed_roles(pilot):
                     pilot.set_role(hint, "strategist")
                 else:
                     pilot.set_role(self.default_role(pilot), "default")
@@ -326,6 +331,16 @@ class AgentContext:
             if nav.waypoint_symbol == waypoint and p.ship.cargo.free > 0:
                 return p  # here but docked / mid-step; usable shortly
         return None
+
+    async def set_operator_role(self, pilot: ShipPilot, role: str | None) -> None:
+        """Pin (or with None, unpin) a ship's role from the UI; persisted across restarts."""
+        if role is None:
+            self.operator_roles.pop(pilot.ship.symbol, None)
+            pilot.set_role(self.default_role(pilot), "default")
+        else:
+            self.operator_roles[pilot.ship.symbol] = role
+            pilot.set_role(role, "operator")
+        await self.db.set_kv(f"operator_roles:{self.symbol}", self.operator_roles)
 
     def request_replan(self, reason: str) -> None:
         self.replan_reason = reason
