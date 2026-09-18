@@ -515,7 +515,7 @@ class AgentContext:
         )
         for sym, role in plan.role_hints.items():
             p = self.pilots.get(sym)
-            if p and role in self.allowed_roles(p):
+            if p and p.role_source != "operator" and role in self.allowed_roles(p):
                 p.set_role(role, "strategist")
         self.last_roles_ts = time.time()
 
@@ -545,8 +545,8 @@ class AgentContext:
             p = self.pilots.get(sym)
             if p is None or role == p.role or role not in allowed[sym]:
                 continue
-            # Only override an explicit strategist hint when Jev is fairly sure.
-            if p.role_source == "strategist" and conf < 0.6:
+            # Operator picks are sticky; strategist hints yield only when Jev is fairly sure.
+            if p.role_source == "operator" or (p.role_source == "strategist" and conf < 0.6):
                 continue
             p.set_role(role, f"jev ({conf:.2f})")
             changed.append(f"{sym}→{role}")
