@@ -26,6 +26,10 @@ class WaypointTrait(STModel):
     name: str = ""
 
 
+class WaypointFaction(STModel):
+    symbol: str
+
+
 class Waypoint(STModel):
     symbol: str
     type: str
@@ -35,6 +39,8 @@ class Waypoint(STModel):
     traits: list[WaypointTrait] = Field(default_factory=list)
     orbits: str | None = None
     is_under_construction: bool = False
+    faction: WaypointFaction | None = None
+    faction: WaypointFaction | None = None
 
     def has_trait(self, trait: str) -> bool:
         return any(t.symbol == trait for t in self.traits)

@@ -89,7 +89,8 @@ class JevBrain:
             "long_term_goals": goals,
             "situation": context,
             "rules": [
-                "Contracts pay well and expire; prioritise them while deliverable.",
+                "Prioritise the contract while `situation.contract_economics.worth_it` is true; "
+                "if the market pays clearly more for the same goods, mine-and-sell instead.",
                 "Probes cannot carry cargo or mine, they should scout markets.",
                 "A cargo ship without a mining laser is most valuable as a haul shuttle when "
                 "there are two or more miners; otherwise as a trader.",
@@ -116,30 +117,6 @@ class JevBrain:
         if resp is None:
             return {}
         return {sym: (a.choice, a.confidence) for sym, a in resp.choices.items()}
-
-    async def should_accept_contract(
-        self, *, agent: str, contract: dict[str, Any], context: dict[str, Any]
-    ) -> float | None:
-        state = {"contract": contract, "situation": context}
-        resp = await self._ask(
-            state,
-            {
-                "accept": Noul(
-                    instructions=(
-                        "Should the agent accept this contract? Consider whether the fleet can "
-                        "plausibly obtain the goods (mine them or buy them below the payout) and "
-                        "deliver before the deadline."
-                    ),
-                    criteria={
-                        "true": "Feasible and profitable given the fleet and known markets",
-                        "false": "Unobtainable goods, unprofitable, or the deadline is unrealistic",
-                    },
-                )
-            },
-            agent=agent,
-            purpose="accept_contract",
-        )
-        return None if resp is None else float(resp.nouls["accept"].noul)
 
     async def choose_option(
         self,

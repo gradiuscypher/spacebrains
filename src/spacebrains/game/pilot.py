@@ -34,7 +34,9 @@ class ShipPilot:
         self.status = "starting"
         self.target: str | None = None
         self.last_error: str | None = None
-        self.purchase_request: tuple[str, str] | None = None  # (ship_type, shipyard wp)
+        # One-off errands the supervisor hands out: ("purchase", ship_type, shipyard) or
+        # ("negotiate", "", faction waypoint). Runs before the role step.
+        self.errand: tuple[str, str, str] | None = None
         self.in_step = False
         self.needs_refresh = False  # another pilot changed our cargo (transfer)
         self._wait_since: float | None = None
@@ -267,8 +269,8 @@ class ShipPilot:
         if self.needs_refresh:
             self.needs_refresh = False
             await self.refresh()
-        if self.purchase_request:
-            return await self.step_purchase()
+        if self.errand:
+            return await self.step_errand()
         handler = {
             "contract": self.step_contract,
             "mine": self.step_mine,
@@ -592,6 +594,11 @@ class ShipPilot:
             data={"contract": contract.id, "payout": contract.terms.payment.on_fulfilled},
         )
         self.ctx.request_replan("contract fulfilled")
+        # Close the loop right here if the drop-off point has a faction presence.
+        sw = await self.ctx.system_world()
+        w = sw.waypoints.get(self.wp)
+        if w is not None and w.faction is not None and self.ship.nav.status == "DOCKED":
+            await self.ctx.try_negotiate(self)
         return 1
 
     async def _buy(self, good: str, units: int, volume: int) -> int:
@@ -759,17 +766,20 @@ class ShipPilot:
         return 20
 
     # ---------------------------------------------------------------- purchase
-    async def step_purchase(self) -> float:
-        assert self.purchase_request is not None
-        ship_type, yard = self.purchase_request
-        eta = await self.go_to(yard)
+    async def step_errand(self) -> float:
+        assert self.errand is not None
+        kind, arg, where = self.errand
+        eta = await self.go_to(where)
         if eta is not None:
-            self.status = f"heading to shipyard {yard} to buy {ship_type}"
+            self.status = f"errand: {kind} {arg} at {where}"
             return eta
         await self.ensure_docked()
         await self.observe_here()
-        self.purchase_request = None
-        await self.ctx.try_purchase_ship(ship_type, yard)
+        self.errand = None
+        if kind == "purchase":
+            await self.ctx.try_purchase_ship(arg, where)
+        elif kind == "negotiate":
+            await self.ctx.try_negotiate(self)
         return 1
 
 

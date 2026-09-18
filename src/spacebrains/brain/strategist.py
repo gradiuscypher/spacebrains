@@ -80,7 +80,9 @@ Game facts:
 - Ships must be IN_ORBIT to navigate/extract and DOCKED to trade/refuel. Travel costs fuel.
 - Contracts: accept -> deliver units of a good to a waypoint -> fulfill for a large payout.
   Contract goods can be mined (ores like IRON_ORE, COPPER_ORE, ALUMINUM_ORE at asteroids) or bought
-  at a market that exports them. Contracts have deadlines.
+  at a market that exports them. Contracts have deadlines. Only one contract at a time; the
+  tactical layer always accepts offers (it pays on acceptance, no penalty for not finishing) and
+  `contract_economics` tells you whether finishing beats selling the same goods at market.
 - Mining ships need MOUNT_MINING_LASER; probes (FRAME_PROBE) carry no cargo but travel for free,
   so they are perfect market scouts. Markets only show prices when one of our ships is there.
 - Ship types buyable at shipyards: SHIP_MINING_DRONE (~cheap, mines), SHIP_LIGHT_HAULER (cargo),

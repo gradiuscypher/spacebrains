@@ -63,8 +63,8 @@ class AgentContext:
         self.last_roles_ts = 0.0
         self.replan_reason: str | None = None
         self.purchase_pending = False
-        self._declined: dict[str, float] = {}
         self._contracts_checked_ts = 0.0
+        self._negotiate_ts = 0.0
         self._known_export_goods: set[str] = set()
         self.surveys: list[Survey] = []
         self._agent_refreshed_ts = 0.0
@@ -351,6 +351,9 @@ class AgentContext:
         await self.maybe_buy_ship()
 
     async def maybe_accept_contract(self) -> None:
+        """Accepting is strictly dominant: it pays `on_accepted`, there is no penalty for not
+        finishing, and an unaccepted offer blocks negotiating a new one just the same. How hard
+        the fleet works it is decided by role assignment using `contract_economics`."""
         if self.active_contract() is not None:
             return
         if time.time() - self._contracts_checked_ts < 60:
@@ -360,73 +363,95 @@ class AgentContext:
         for c in self.contracts.values():
             if c.accepted or c.fulfilled:
                 continue
-            if time.time() - self._declined.get(c.id, 0) < 1800:
-                continue
             info = contract_summary(c)
-            feasibility = self.contract_feasibility(c)
-            prob: float | None = None
-            if feasibility["fleet_can_mine_goods"] and feasibility["days_to_deadline"] >= 1:
-                decision = True  # obvious case: keep the rule in code, save a Jev call
-            else:
-                if self.jev_enabled:
-                    prob = await self.jev.should_accept_contract(
-                        agent=self.symbol,
-                        contract={**info, **feasibility},
-                        context=await self.situation(),
-                    )
-                decision = prob is None or prob >= 0.4
-            if decision:
-                updated = await self.client.accept_contract(c.id)
-                self.update_contract(updated)
-                await self.refresh_agent()
-                await self.emit(
-                    "contract_accepted",
-                    f"accepted contract {c.id} ({info['deliver']})"
-                    + ("" if prob is None else f" p={prob:.2f}"),
-                    data=info,
-                )
-                self.request_replan("contract accepted")
-                for p in self.pilots.values():
-                    if p.role == "mine" and self.can_work_contract(p):
-                        p.set_role("contract", "new contract")
-                return
-            self._declined[c.id] = time.time()
+            updated = await self.client.accept_contract(c.id)
+            self.update_contract(updated)
+            await self.refresh_agent()
+            econ = await self.contract_economics()
             await self.emit(
-                "contract_declined", f"declined contract {c.id} p={prob:.2f}", data=info
+                "contract_accepted",
+                f"accepted contract {c.id} ({info['deliver']}); "
+                f"payout {econ.get('payout_remaining')} vs market {econ.get('market_value_of_goods')}",
+                data={**info, **econ},
             )
+            self.request_replan("contract accepted")
+            for p in self.pilots.values():
+                if p.role == "mine" and self.can_work_contract(p) and econ.get("worth_it", True):
+                    p.set_role("contract", "new contract")
+            return
 
-    def contract_feasibility(self, c: Contract) -> dict[str, Any]:
-        goods = [d.trade_symbol for d in c.terms.deliver if d.remaining > 0]
-        miners = [p for p in self.pilots.values() if p.ship.can_mine]
-        siphoners = [p for p in self.pilots.values() if p.ship.can_siphon]
-        can_mine = all(
-            (g in MINABLE_ORES and miners) or (g in SIPHONABLE and siphoners) for g in goods
-        )
+    async def contract_economics(self) -> dict[str, Any]:
+        """Is finishing the active contract better than selling the same goods on the market?"""
+        c = self.active_contract()
+        if c is None:
+            return {}
+        remaining = {d.trade_symbol: d.remaining for d in c.terms.deliver if d.remaining > 0}
+        rows = await self.world.fresh_rows(self.home_system)
+        best_sell: dict[str, int] = {}
+        for r in rows:
+            if r["good"] in remaining and r["sell"]:
+                best_sell[r["good"]] = max(best_sell.get(r["good"], 0), int(r["sell"]))
+        market_value = sum(best_sell.get(g, 0) * n for g, n in remaining.items())
+        known = all(g in best_sell for g in remaining)
+        payout = c.terms.payment.on_fulfilled
         days = (c.terms.deadline - datetime.now(UTC)).total_seconds() / 86400
+        miners = [p for p in self.pilots.values() if p.ship.can_mine or p.ship.can_siphon]
+        can_mine = all(
+            (g in MINABLE_ORES and any(p.ship.can_mine for p in miners))
+            or (g in SIPHONABLE and any(p.ship.can_siphon for p in miners))
+            for g in remaining
+        )
         return {
-            "fleet_can_mine_goods": bool(goods) and bool(can_mine),
-            "fleet_mining_ships": len(miners),
-            "fleet_cargo_ships": sum(1 for p in self.pilots.values() if p.ship.cargo.capacity > 0),
+            "units_remaining": sum(remaining.values()),
+            "goods": list(remaining),
+            "payout_remaining": payout,
+            "market_value_of_goods": market_value if known else None,
+            "premium_over_market": (payout - market_value) if known else None,
             "days_to_deadline": round(days, 1),
-            "goods_buyable_from_known_markets": [g for g in goods if g in self._known_export_goods],
+            "fleet_can_mine_goods": bool(remaining) and can_mine,
+            # Worth it unless the market pays clearly more for the same goods.
+            "worth_it": (not known) or payout >= market_value * 0.8,
         }
 
     async def maybe_negotiate_contract(self) -> None:
-        """If no contracts are available at all, ask a docked ship to negotiate one."""
+        """With no contract offered or ongoing, negotiate one at a faction waypoint."""
         if any(not c.fulfilled for c in self.contracts.values()):
             return
+        if time.time() - self._negotiate_ts < 120:
+            return
+        self._negotiate_ts = time.time()
+        sw = await self.system_world()
+        faction_wps = {w.symbol for w in sw.waypoints.values() if w.faction is not None}
         for p in self.pilots.values():
-            if p.ship.nav.status == "DOCKED":
-                try:
-                    c = await self.client.negotiate_contract(p.ship.symbol)
-                except STError as e:
-                    await self.emit("info", f"negotiate contract failed: {e.message}")
-                    return
-                self.update_contract(c)
-                await self.emit(
-                    "contract_offered", f"negotiated contract {c.id}", data=contract_summary(c)
-                )
+            if p.ship.nav.status == "DOCKED" and p.wp in faction_wps and not p.in_step:
+                await self.try_negotiate(p)
                 return
+        if any(p.errand for p in self.pilots.values()):
+            return
+        runner = self._pick_errand_ship()
+        if runner is None:
+            return
+        target = min(faction_wps, key=lambda w: sw.dist(runner.wp, w)) if faction_wps else None
+        if target is None:
+            target = self.agent.headquarters if self.agent else None
+        if target:
+            runner.errand = ("negotiate", "", target)
+            runner._wake.set()
+
+    async def try_negotiate(self, pilot: ShipPilot) -> None:
+        try:
+            c = await self.client.negotiate_contract(pilot.ship.symbol)
+        except STError as e:
+            await self.emit("info", f"negotiate contract failed at {pilot.wp}: {e.message}")
+            return
+        self.update_contract(c)
+        await self.emit(
+            "contract_offered",
+            f"negotiated contract {c.id}",
+            data=contract_summary(c),
+            ship=pilot.ship.symbol,
+        )
+        self._contracts_checked_ts = 0.0  # accept on the next tick
 
     async def maybe_replan(self) -> None:
         interval = self.settings.strategist_interval_minutes * 60
@@ -531,7 +556,7 @@ class AgentContext:
     async def maybe_buy_ship(self) -> None:
         if not self.purchase_pending or self.plan is None or self.plan.ship_purchase is None:
             return
-        if any(p.purchase_request for p in self.pilots.values()):
+        if any(p.errand for p in self.pilots.values()):
             return
         req = self.plan.ship_purchase
         if len(self.pilots) >= self.settings.max_ships_to_buy + 2:
@@ -560,8 +585,7 @@ class AgentContext:
             scout = self._pick_errand_ship()
             if scout:
                 target = min(yards, key=lambda y: sw.dist(scout.wp, y))
-                scout.purchase_request = (req.ship_type, target)
-                scout.set_role(scout.role, "errand")
+                scout.errand = ("purchase", req.ship_type, target)
                 scout._wake.set()
             return
         yard, price = min(offers, key=lambda o: o[1])
@@ -591,7 +615,7 @@ class AgentContext:
         if ship.wp == yard and ship.ship.nav.status != "IN_TRANSIT":
             await self.try_purchase_ship(req.ship_type, yard)
         else:
-            ship.purchase_request = (req.ship_type, yard)
+            ship.errand = ("purchase", req.ship_type, yard)
             ship._wake.set()
 
     def _pick_errand_ship(self, prefer_at: str | None = None) -> ShipPilot | None:
@@ -653,6 +677,7 @@ class AgentContext:
             "reserve": self.settings.min_credit_reserve,
             "ships": len(self.pilots),
             "active_contract": contract_summary(c) if c else None,
+            "contract_economics": await self.contract_economics(),
             "markets_known": f"{fresh}/{len(stale)} fresh",
             "best_routes": [
                 r.as_dict() for r in await self.world.best_routes(self.home_system, 40, 3)
@@ -682,6 +707,7 @@ class AgentContext:
                 for p in self.pilots.values()
             ],
             "contracts": [contract_summary(c) for c in self.contracts.values() if not c.fulfilled],
+            "contract_economics": await self.contract_economics(),
             "contracts_fulfilled": sum(1 for c in self.contracts.values() if c.fulfilled),
             "system": {
                 "asteroids": [w.symbol + ":" + w.type for w in sw.asteroids()][:6],
