@@ -23,7 +23,7 @@ from spacebrains.game.pilot import ShipPilot
 from spacebrains.game.world import MINABLE_ORES, SIPHONABLE, SystemWorld, TradeRoute, World
 from spacebrains.settings import AgentOverrides, Settings, effective
 from spacebrains.st.client import STClient, STError
-from spacebrains.st.models import Agent, Contract
+from spacebrains.st.models import Agent, Contract, Survey
 
 log = logging.getLogger("spacebrains.agent")
 
@@ -66,6 +66,7 @@ class AgentContext:
         self._declined: dict[str, float] = {}
         self._contracts_checked_ts = 0.0
         self._known_export_goods: set[str] = set()
+        self.surveys: list[Survey] = []
         self._task: asyncio.Task[None] | None = None
         self._system_cache: SystemWorld | None = None
         self.started_at = time.time()
@@ -222,6 +223,32 @@ class AgentContext:
             if c.accepted and not c.fulfilled:
                 return c
         return None
+
+    # ---------------------------------------------------------------- surveys
+    def usable_surveys(self, waypoint: str) -> list[Survey]:
+        now = datetime.now(UTC)
+        self.surveys = [x for x in self.surveys if x.expiration > now]
+        return [x for x in self.surveys if x.symbol == waypoint]
+
+    def add_surveys(self, found: list[Survey]) -> None:
+        self.surveys.extend(found)
+
+    def drop_survey(self, survey: Survey) -> None:
+        self.surveys = [x for x in self.surveys if x.signature != survey.signature]
+
+    @staticmethod
+    def best_survey(surveys: list[Survey], wanted: set[str]) -> Survey | None:
+        """Prefer surveys dense in wanted goods, then larger deposits."""
+        if not surveys:
+            return None
+        size_rank = {"SMALL": 0, "MODERATE": 1, "LARGE": 2}
+
+        def score(x: Survey) -> tuple[float, int]:
+            deposits = [d.get("symbol") for d in x.deposits]
+            hits = sum(1 for d in deposits if d in wanted)
+            return (hits / max(len(deposits), 1), size_rank.get(x.size, 0))
+
+        return max(surveys, key=score)
 
     def request_replan(self, reason: str) -> None:
         self.replan_reason = reason
@@ -482,15 +509,28 @@ class AgentContext:
             ship._wake.set()
 
     def _pick_errand_ship(self, prefer_at: str | None = None) -> ShipPilot | None:
+        """Probe first (it travels free and has nothing better to do), then whoever is closest."""
+        if not self.pilots:
+            return None
+        if prefer_at:
+            here = [
+                p
+                for p in self.pilots.values()
+                if p.wp == prefer_at and p.ship.nav.status != "IN_TRANSIT"
+            ]
+            if here:
+                return here[0]
+        probes = [p for p in self.pilots.values() if p.ship.is_probe]
+        if probes:
+            return probes[0]
         cands = [p for p in self.pilots.values() if p.ship.nav.status != "IN_TRANSIT"]
         if not cands:
             return None
         if prefer_at:
-            here = [p for p in cands if p.wp == prefer_at]
-            if here:
-                return here[0]
-        probes = [p for p in cands if p.ship.is_probe]
-        return (probes or cands)[0]
+            sw = self.world.systems.get(self.home_system)
+            if sw:
+                return min(cands, key=lambda p: sw.dist(p.wp, prefer_at))
+        return cands[0]
 
     async def try_purchase_ship(self, ship_type: str, yard: str) -> None:
         try:

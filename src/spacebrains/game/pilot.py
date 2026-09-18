@@ -338,9 +338,34 @@ class ShipPilot:
             self.status = f"cooldown {int(s.cooldown_remaining)}s at {self.wp}"
             return s.cooldown_remaining + 0.5
         await self.ensure_orbit()
-        data = await (
-            self.ctx.client.extract(s.symbol) if s.can_mine else self.ctx.client.siphon(s.symbol)
-        )
+        if s.can_siphon and not s.can_mine:
+            data = await self.ctx.client.siphon(s.symbol)
+        else:
+            # Surveys multiply yields and let us target the contract good.
+            surveys = self.ctx.usable_surveys(self.wp)
+            if s.can_survey and not surveys:
+                cooldown, found = await self.ctx.client.survey(s.symbol)
+                s.cooldown = cooldown
+                self.ctx.add_surveys(found)
+                self.status = f"surveyed {self.wp}: {len(found)} deposits"
+                await self.ctx.emit(
+                    "survey",
+                    f"{s.symbol} surveyed {self.wp}: "
+                    + ", ".join(
+                        f"{x.size} [{' '.join(d.get('symbol', '') for d in x.deposits)}]"
+                        for x in found
+                    ),
+                    ship=s.symbol,
+                )
+                return s.cooldown_remaining + 0.5
+            survey = self.ctx.best_survey(surveys, keep_goods or set())
+            try:
+                data = await self.ctx.client.extract(s.symbol, survey)
+            except STError as e:
+                if survey is not None and e.code in (4221, 4224):  # expired / exhausted
+                    self.ctx.drop_survey(survey)
+                    return 1
+                raise
         s.cargo = s.cargo.model_validate(data["cargo"])
         s.cooldown = s.cooldown.model_validate(data["cooldown"])
         got = data.get("extraction", data.get("siphon", {})).get("yield", {})
