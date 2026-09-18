@@ -107,6 +107,14 @@ export function OverviewPage({ data, reload, onOpen }: { data: Overview | null; 
   const total = data.agents.reduce((s, a) => s + a.credits, 0)
   return (
     <div className="stack" style={{ gap: 12 }}>
+      {data.reset_detected && (
+        <div className="notice bad row between">
+          <span>
+            <b>Universe reset detected.</b> {data.reset_detected}
+          </span>
+          <button onClick={() => void api.ackReset().then(reload)}>Acknowledge</button>
+        </div>
+      )}
       <div className="grid cards">
         <div className="card">
           <h2>Fleet credits</h2>
@@ -120,6 +128,12 @@ export function OverviewPage({ data, reload, onOpen }: { data: Overview | null; 
               </>
             )}
           </div>
+          {data.server.reset_date && (
+            <div className="sub" style={{ marginTop: 6 }}>
+              Server {data.server.version} · reset {data.server.reset_date}
+              {data.server.next_reset ? ` · next ${new Date(data.server.next_reset).toLocaleDateString()}` : ''}
+            </div>
+          )}
         </div>
         <div className="card">
           <h2>LLM spend this month</h2>

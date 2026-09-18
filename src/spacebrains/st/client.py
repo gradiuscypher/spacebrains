@@ -188,6 +188,17 @@ class STClient:
             page += 1
 
     # -------------------------------------------------------------- account
+    async def status(self) -> dict[str, Any]:
+        """Server status: reset date, announcements, stats. Unauthenticated."""
+        return await self._request("GET", "/", auth=False)
+
+    async def repair_cost(self, ship: str) -> int:
+        body = await self._get(f"/my/ships/{ship}/repair")
+        return int(body["data"]["transaction"]["totalPrice"])
+
+    async def repair(self, ship: str) -> dict[str, Any]:
+        return (await self._post(f"/my/ships/{ship}/repair"))["data"]
+
     async def register(self, symbol: str, faction: str) -> dict[str, Any]:
         """Uses the account token to create a new agent; returns the raw data incl. agent token."""
         body = await self._post("/register", {"symbol": symbol, "faction": faction})

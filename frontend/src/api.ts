@@ -42,6 +42,7 @@ export interface Ship {
   fuel: { current: number; capacity: number }
   cargo: { units: number; capacity: number; inventory: Record<string, number> }
   cooldown: number
+  condition: number
   can_mine: boolean
   can_siphon: boolean
   last_error: string | null
@@ -149,6 +150,8 @@ export interface Overview {
   agents: AgentSnapshot[]
   usage: { month_openrouter_usd: number; month_typesafe_usd: number; by_model: UsageRow[] }
   api_rate: { limit_per_second: number; per_agent_last_minute: Record<string, number> }
+  server: { reset_date?: string; next_reset?: string; version?: string; announcements?: string[]; checked_at?: number }
+  reset_detected: string | null
 }
 
 export interface GameEvent {
@@ -204,6 +207,7 @@ export const api = {
   setRole: (symbol: string, ship: string, role: string) =>
     req(`/api/agents/${symbol}/ships/${ship}/role`, { method: 'POST', body: JSON.stringify({ role }) }),
   remove: (symbol: string) => req(`/api/agents/${symbol}`, { method: 'DELETE' }),
+  ackReset: () => req('/api/reset/acknowledge', { method: 'POST' }),
   events: (agent?: string, limit = 200) =>
     req<GameEvent[]>(`/api/events?limit=${limit}${agent ? `&agent=${agent}` : ''}`),
 }

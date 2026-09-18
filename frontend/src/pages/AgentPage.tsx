@@ -29,6 +29,7 @@ function ShipRow({ s, agent, onChanged }: { s: Ship; agent: string; onChanged: (
         <div className="mono">{s.symbol}</div>
         <div className="sub">
           {s.frame} · {s.ship_role.toLowerCase()}
+          {s.condition < 0.6 ? <span className="pill bad"> hull {Math.round(s.condition * 100)}%</span> : null}
         </div>
       </td>
       <td>

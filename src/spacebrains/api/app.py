@@ -93,6 +93,11 @@ def create_app(cfg: Config) -> FastAPI:
         out.sort(key=lambda x: x["prompt_per_m"])
         return {"models": out}
 
+    @app.post("/api/reset/acknowledge")
+    async def ack_reset() -> dict[str, str]:
+        await orch.acknowledge_reset()
+        return {"ok": "1"}
+
     # ------------------------------------------------------------ agents
     @app.post("/api/agents")
     async def register(body: RegisterBody) -> dict[str, Any]:

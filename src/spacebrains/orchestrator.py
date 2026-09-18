@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from typing import Any
 
 import httpx
@@ -34,6 +36,9 @@ class Orchestrator:
         self.settings = Settings()
         self.jev = JevBrain(cfg.typesafe_api_key, self.db, self.settings.jev_model)
         self.agents: dict[str, AgentContext] = {}
+        self.server: dict[str, Any] = {}
+        self.reset_detected: str | None = None
+        self._watch_task: asyncio.Task[None] | None = None
         self.account_client = STClient(
             cfg.spacetraders_base_url, cfg.spacetraders_api_key, self.limiter, self.http
         )
@@ -45,11 +50,56 @@ class Orchestrator:
         if stored:
             self.settings = Settings.model_validate({**Settings().model_dump(), **stored})
         self.jev.model = self.settings.jev_model
+        self.reset_detected = await self.db.get_kv("reset_detected")
         for row in await self.db.list_agents():
+            if self.reset_detected and row.enabled:
+                continue  # tokens died with the universe; wait for the operator
             self._spawn(row)
+        self._watch_task = asyncio.create_task(self._watch_server(), name="server-watch")
         await self.bus.emit("system", f"orchestrator started with {len(self.agents)} agent(s)")
 
+    async def _watch_server(self) -> None:
+        """Poll the game server status; a changed resetDate means every agent token is dead."""
+        while True:
+            try:
+                status = await self.account_client.status()
+                self.server = {
+                    "reset_date": status.get("resetDate"),
+                    "next_reset": (status.get("serverResets") or {}).get("next"),
+                    "version": status.get("version"),
+                    "announcements": [a.get("title") for a in status.get("announcements", [])][:3],
+                    "checked_at": time.time(),
+                }
+                known = await self.db.get_kv("reset_date")
+                current = status.get("resetDate")
+                if known is None:
+                    await self.db.set_kv("reset_date", current)
+                elif current != known and not self.reset_detected:
+                    await self._handle_reset(known, current)
+            except Exception as e:
+                log.warning("server status check failed: %s", e)
+            await asyncio.sleep(600)
+
+    async def _handle_reset(self, old: str | None, new: str | None) -> None:
+        self.reset_detected = (
+            f"universe reset {old} → {new}: all agents disabled; register new ones"
+        )
+        await self.db.set_kv("reset_detected", self.reset_detected)
+        await self.db.set_kv("reset_date", new)
+        for ctx in list(self.agents.values()):
+            await ctx.stop()
+            await self.db.set_agent_enabled(ctx.symbol, False)
+            ctx.row.enabled = False
+        await self.bus.emit("reset", self.reset_detected)
+
+    async def acknowledge_reset(self) -> None:
+        """Operator has seen the reset notice; removed agents can be re-registered."""
+        self.reset_detected = None
+        await self.db.set_kv("reset_detected", None)
+
     async def stop(self) -> None:
+        if self._watch_task:
+            self._watch_task.cancel()
         for a in list(self.agents.values()):
             await a.stop()
         await self.jev.aclose()
@@ -150,6 +200,8 @@ class Orchestrator:
         return {
             "settings": self.settings.model_dump(),
             "agents": [a.snapshot() for a in self.agents.values()],
+            "server": self.server,
+            "reset_detected": self.reset_detected,
             "api_rate": {
                 "limit_per_second": 2.0,
                 "per_agent_last_minute": self.limiter.stats(60),

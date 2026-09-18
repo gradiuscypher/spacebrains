@@ -73,6 +73,16 @@ Roles come from, in priority order: operator override (UI) → strategist `role_
   accepted in code). Jev calls cost ~$0.00002 each.
 - The Settings page shows spend by model and OpenRouter's own view of the key's usage.
 
+## Running unattended
+
+- `deploy/spacebrains.service` — systemd unit (edit `User`/`WorkingDirectory`).
+- `docker compose up -d --build` — container with `./data` mounted for the SQLite DB.
+- The orchestrator polls the server every 10 min; when the universe **resets** (new `resetDate`)
+  every agent token is dead, so it disables all agents and shows a banner in the UI. Acknowledge
+  it, remove the stale agents, register new ones.
+- Ships repair at a shipyard when hull/engine condition drops (opportunistically < 60%, by
+  making the trip < 30%).
+
 ## Checks
 
 ```sh

@@ -85,6 +85,7 @@ class ShipPilot:
                 "inventory": {i.symbol: i.units for i in s.cargo.inventory},
             },
             "cooldown": round(s.cooldown_remaining),
+            "condition": round(min(s.frame.condition, s.engine.condition), 2),
             "can_mine": s.can_mine,
             "can_siphon": s.can_siphon,
             "speed": s.engine.speed,
@@ -314,6 +315,8 @@ class ShipPilot:
             await self.refresh()
         if self.errand:
             return await self.step_errand()
+        if await self.maybe_repair():
+            return 1
         handler = {
             "contract": self.step_contract,
             "mine": self.step_mine,
@@ -867,6 +870,39 @@ class ShipPilot:
         return 20
 
     # ---------------------------------------------------------------- purchase
+    async def maybe_repair(self) -> bool:
+        """Repair at a shipyard when the hull is worn: opportunistically below 60%, or by
+        making the trip below 30%. Returns True if an action was taken this step."""
+        s = self.ship
+        worst = min(s.frame.condition, s.engine.condition)
+        if worst >= 0.6 or (s.cargo.capacity == 0 and s.is_probe):
+            return False
+        sw = await self.sw()
+        here = sw.waypoints.get(self.wp)
+        at_yard = here is not None and here.is_shipyard
+        if not at_yard:
+            if worst < 0.3 and not self.errand:
+                yard = sw.nearest(self.wp, sw.shipyard_waypoints())
+                if yard is not None:
+                    self.errand = ("repair", "", yard.symbol)
+                    return True
+            return False
+        await self.ensure_docked()
+        cost = await self.ctx.client.repair_cost(s.symbol)
+        if cost > max(0, self.ctx.credits - self.ctx.settings.min_credit_reserve // 2):
+            self.status = f"repair needs {cost}c, waiting"
+            return False
+        data = await self.ctx.client.repair(s.symbol)
+        self.ship = self.ship.model_validate(data["ship"])
+        await self.ctx.on_credits(data["agent"]["credits"])
+        await self.ctx.emit(
+            "repair",
+            f"{s.symbol} repaired at {self.wp} for {cost}c (condition was {worst:.0%})",
+            ship=s.symbol,
+            data={"cost": cost},
+        )
+        return True
+
     async def step_errand(self) -> float:
         assert self.errand is not None
         kind, arg, where = self.errand
@@ -881,6 +917,8 @@ class ShipPilot:
             await self.ctx.try_purchase_ship(arg, where)
         elif kind == "negotiate":
             await self.ctx.try_negotiate(self)
+        elif kind == "repair":
+            await self.maybe_repair()
         return 1
 
 
