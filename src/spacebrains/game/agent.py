@@ -125,7 +125,11 @@ class AgentContext:
 
     async def bootstrap(self) -> None:
         await self.refresh_agent()
-        self.starting_credits = self.credits
+        first_seen = await self.db.get_kv(f"starting_credits:{self.symbol}")
+        if first_seen is None:
+            first_seen = self.credits
+            await self.db.set_kv(f"starting_credits:{self.symbol}", first_seen)
+        self.starting_credits = int(first_seen)
         assert self.agent is not None
         await self.world.load_system(self.client, self.agent.headquarters.rsplit("-", 1)[0])
         await self.refresh_contracts()
