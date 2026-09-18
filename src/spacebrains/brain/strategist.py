@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import json
 import logging
-from typing import Any, Literal
+from typing import Any, ClassVar, Literal
 
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError, field_validator
 
 from spacebrains.brain.openrouter import ChatResult, OpenRouter
 
@@ -28,9 +28,24 @@ GoalKind = Literal[
 ]
 
 
-class Goal(BaseModel):
+class _ClampedText(BaseModel):
+    """Truncates over-long model prose rather than rejecting an otherwise valid plan."""
+
+    _text_limit: ClassVar[int] = 1500
+
+    @field_validator("*", mode="after")
+    @classmethod
+    def _clamp(cls, value: Any) -> Any:
+        limit = cls._text_limit
+        if isinstance(value, str) and len(value) > limit:
+            return value[: limit - 1] + "…"
+        return value
+
+
+class Goal(_ClampedText):
+    _text_limit: ClassVar[int] = 400
     kind: GoalKind
-    description: str = Field(max_length=300)
+    description: str
     priority: int = Field(default=5, ge=1, le=10, description="1 = most important")
     params: dict[str, Any] = Field(default_factory=dict)
 
@@ -42,14 +57,14 @@ class ShipPurchase(BaseModel):
     when_credits_above: int = Field(default=0, ge=0)
 
 
-class Plan(BaseModel):
-    assessment: str = Field(default="", max_length=1200)
+class Plan(_ClampedText):
+    assessment: str = ""
     goals: list[Goal] = Field(default_factory=list, max_length=8)
     ship_purchase: ShipPurchase | None = None
     role_hints: dict[str, Literal["contract", "mine", "trade", "scout", "idle"]] = Field(
         default_factory=dict
     )
-    notes_for_next_time: str = Field(default="", max_length=600)
+    notes_for_next_time: str = ""
 
 
 class Critique(BaseModel):
