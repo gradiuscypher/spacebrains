@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import time
+from collections import deque
 from typing import Any
 
 import httpx
@@ -41,25 +42,66 @@ class STError(Exception):
 
 
 class RateLimiter:
-    """Token bucket: `rate` tokens/sec, up to `burst` stored."""
+    """Token bucket (`rate`/s, `burst` stored) with round-robin fair share between keys.
+
+    The game server limits per IP, so every agent in the process shares this one bucket. Each
+    agent acquires under its own key; when tokens are scarce the dispatcher rotates between keys
+    so a large fleet cannot starve a small one. Idle keys cost nothing.
+    """
 
     def __init__(self, rate: float = 2.0, burst: int = 8) -> None:
         self._rate = rate
         self._burst = burst
         self._tokens = float(burst)
         self._last = time.monotonic()
-        self._lock = asyncio.Lock()
+        self._queues: dict[str, deque[asyncio.Future[None]]] = {}
+        self._order: deque[str] = deque()
+        self._dispatcher: asyncio.Task[None] | None = None
+        self._granted: deque[tuple[float, str]] = deque()
 
-    async def acquire(self) -> None:
-        async with self._lock:
-            while True:
-                now = time.monotonic()
-                self._tokens = min(self._burst, self._tokens + (now - self._last) * self._rate)
-                self._last = now
-                if self._tokens >= 1:
-                    self._tokens -= 1
-                    return
+    async def acquire(self, key: str = "default") -> None:
+        fut: asyncio.Future[None] = asyncio.get_running_loop().create_future()
+        if key not in self._queues:
+            self._queues[key] = deque()
+            self._order.append(key)
+        self._queues[key].append(fut)
+        if self._dispatcher is None or self._dispatcher.done():
+            self._dispatcher = asyncio.create_task(self._dispatch(), name="ratelimit")
+        await fut
+
+    def _refill(self) -> None:
+        now = time.monotonic()
+        self._tokens = min(self._burst, self._tokens + (now - self._last) * self._rate)
+        self._last = now
+
+    async def _dispatch(self) -> None:
+        while any(self._queues.values()):
+            self._refill()
+            if self._tokens < 1:
                 await asyncio.sleep((1 - self._tokens) / self._rate)
+                continue
+            # Rotate to the next key that has a waiter.
+            for _ in range(len(self._order)):
+                key = self._order[0]
+                self._order.rotate(-1)
+                q = self._queues[key]
+                while q and q[0].done():  # cancelled waiter
+                    q.popleft()
+                if q:
+                    self._tokens -= 1
+                    q.popleft().set_result(None)
+                    self._granted.append((time.monotonic(), key))
+                    break
+
+    def stats(self, window: float = 60.0) -> dict[str, float]:
+        """Requests granted per key in the last `window` seconds."""
+        cutoff = time.monotonic() - window
+        while self._granted and self._granted[0][0] < cutoff:
+            self._granted.popleft()
+        out: dict[str, float] = {}
+        for _, key in self._granted:
+            out[key] = out.get(key, 0) + 1
+        return out
 
 
 class STClient:
@@ -69,10 +111,12 @@ class STClient:
         token: str,
         limiter: RateLimiter,
         http: httpx.AsyncClient | None = None,
+        key: str = "account",
     ) -> None:
         self._base = base_url.rstrip("/")
         self._token = token
         self._limiter = limiter
+        self._key = key
         self._http = http or httpx.AsyncClient(timeout=30)
         self._owns_http = http is None
         self.request_count = 0
@@ -95,7 +139,7 @@ class STClient:
         if auth:
             headers["Authorization"] = f"Bearer {self._token}"
         for attempt in range(6):
-            await self._limiter.acquire()
+            await self._limiter.acquire(self._key)
             self.request_count += 1
             try:
                 resp = await self._http.request(

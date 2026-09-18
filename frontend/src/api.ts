@@ -133,6 +133,7 @@ export interface Overview {
   settings: Settings
   agents: AgentSnapshot[]
   usage: { month_openrouter_usd: number; month_typesafe_usd: number; by_model: UsageRow[] }
+  api_rate: { limit_per_second: number; per_agent_last_minute: Record<string, number> }
 }
 
 export interface GameEvent {

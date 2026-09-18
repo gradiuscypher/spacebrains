@@ -132,6 +132,31 @@ export function OverviewPage({ data, reload, onOpen }: { data: Overview | null; 
           </div>
         </div>
         <div className="card">
+          <h2>SpaceTraders API (shared per IP)</h2>
+          {(() => {
+            const per = data.api_rate.per_agent_last_minute
+            const total = Object.values(per).reduce((s, n) => s + n, 0)
+            const cap = data.api_rate.limit_per_second * 60
+            const pct = Math.min(100, (total / cap) * 100)
+            return (
+              <>
+                <div className="hero">{(total / 60).toFixed(2)} req/s</div>
+                <div className="sub">of {data.api_rate.limit_per_second} req/s · last minute, fair-shared round-robin</div>
+                <div className={`meter ${pct > 90 ? 'bad' : pct > 70 ? 'warn' : ''}`} style={{ marginTop: 8 }}>
+                  <div style={{ width: `${pct}%` }} />
+                </div>
+                <div className="row" style={{ marginTop: 8 }}>
+                  {Object.entries(per).map(([k, n]) => (
+                    <span key={k} className="pill">
+                      {k}: {(n / 60).toFixed(2)}/s
+                    </span>
+                  ))}
+                </div>
+              </>
+            )
+          })()}
+        </div>
+        <div className="card">
           <h2>Brains</h2>
           <div className="sub">
             <div>

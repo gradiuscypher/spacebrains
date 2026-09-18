@@ -124,3 +124,24 @@ async def test_best_routes_and_sell_markets(tmp_path: Path):
     assert set(stale) == {"X1-T-A", "X1-T-B"} and all(v < 5 for v in stale.values())
     assert sw.asteroids()[0].symbol == "X1-T-C"
     await db.close()
+
+
+async def test_rate_limiter_is_fair_between_keys():
+    import asyncio
+
+    rl = RateLimiter(rate=100, burst=1)
+    order: list[str] = []
+
+    async def hit(key: str) -> None:
+        await rl.acquire(key)
+        order.append(key)
+
+    tasks = [asyncio.create_task(hit("big")) for _ in range(10)]
+    await asyncio.sleep(0)
+    tasks += [asyncio.create_task(hit("small")) for _ in range(2)]
+    await asyncio.gather(*tasks)
+    # Both of the small agent's requests are served within the first few grants.
+    small_positions = [i for i, k in enumerate(order) if k == "small"]
+    assert small_positions[0] <= 2
+    assert small_positions[1] <= 4
+    assert set(rl.stats(60)) == {"big", "small"}

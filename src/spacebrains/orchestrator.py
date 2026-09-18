@@ -58,7 +58,9 @@ class Orchestrator:
         await self.db.close()
 
     def _spawn(self, row: Any) -> AgentContext:
-        client = STClient(self.cfg.spacetraders_base_url, row.token, self.limiter, self.http)
+        client = STClient(
+            self.cfg.spacetraders_base_url, row.token, self.limiter, self.http, key=row.symbol
+        )
         ctx = AgentContext(
             row,
             client=client,
@@ -148,6 +150,10 @@ class Orchestrator:
         return {
             "settings": self.settings.model_dump(),
             "agents": [a.snapshot() for a in self.agents.values()],
+            "api_rate": {
+                "limit_per_second": 2.0,
+                "per_agent_last_minute": self.limiter.stats(60),
+            },
             "usage": {
                 "month_openrouter_usd": await self.db.usage_total("openrouter", month),
                 "month_typesafe_usd": await self.db.usage_total("typesafe", month),

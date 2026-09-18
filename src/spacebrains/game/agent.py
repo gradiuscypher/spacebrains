@@ -67,6 +67,9 @@ class AgentContext:
         self._contracts_checked_ts = 0.0
         self._known_export_goods: set[str] = set()
         self.surveys: list[Survey] = []
+        self._agent_refreshed_ts = 0.0
+        self._fleet_synced_ts = 0.0
+        self._snapshot_ts = 0.0
         self._task: asyncio.Task[None] | None = None
         self._system_cache: SystemWorld | None = None
         self.started_at = time.time()
@@ -272,9 +275,18 @@ class AgentContext:
 
     # ---------------------------------------------------------------- supervisor
     async def supervise(self) -> None:
-        await self.refresh_agent()
-        await self.sync_fleet()
-        await self.db.add_snapshot(self.symbol, self.credits, len(self.pilots))
+        # Keep the supervisor cheap: pilots already report credits after every transaction and
+        # new ships only appear when we buy them, so poll the server sparingly.
+        now = time.time()
+        if now - self._agent_refreshed_ts >= 30:
+            await self.refresh_agent()
+            self._agent_refreshed_ts = now
+        if now - self._fleet_synced_ts >= 60:
+            await self.sync_fleet()
+            self._fleet_synced_ts = now
+        if now - self._snapshot_ts >= 30:
+            await self.db.add_snapshot(self.symbol, self.credits, len(self.pilots))
+            self._snapshot_ts = now
         await self.maybe_accept_contract()
         await self.maybe_negotiate_contract()
         await self.maybe_replan()
@@ -568,6 +580,7 @@ class AgentContext:
         if self.plan.ship_purchase.count <= 0:
             self.purchase_pending = False
         await self.sync_fleet()
+        self._fleet_synced_ts = time.time()
         self.request_replan("ship purchased")
 
     # ---------------------------------------------------------------- summaries
